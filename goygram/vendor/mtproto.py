@@ -7,7 +7,7 @@ import json
 from typing import Any
 
 try:
-    from ext_rust import _ext as rx
+    from goygram.ext import _ext as rx
 except Exception:
     rx = None
 
