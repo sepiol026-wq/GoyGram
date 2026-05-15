@@ -84,15 +84,11 @@ class MTNet:
 
     async def boot(self)->None:
         if self.rd and self.wr and not self.wr.is_closing(): return
-<<<<<<< ours
-        self.rd,self.wr=await asyncio.open_connection(self.host,self.port)
-=======
         px = self.proxy_cfg()
         if px is not None:
             self.rd, self.wr = await self.open_via_proxy(px)
         else:
             self.rd,self.wr=await asyncio.open_connection(self.host,self.port)
->>>>>>> theirs
         self.wr.write(b"\xee\xee\xee\xee"); await self.wr.drain(); self.wrote_tag=True
 
     def cut(self)->list[bytes]:
@@ -278,17 +274,6 @@ class MTNet:
         raise NotImplementedError('del_msg over MT not mapped yet')
 
     async def call(self,act:str,**kw:Any)->dict[str,Any]:
-<<<<<<< ours
-        obj={'act':act}; obj.update({k:v for k,v in kw.items() if v is not None}); await self.send(obj); return {'ok':True,'act':act}
-    async def spin(self)->None:
-        while not self.stop_ev.is_set():
-            raw = await self.rd.read(65536)
-            if not raw:
-                self._log_socket_close()
-                raise ConnectionError('mt socket closed')
-            print(f"[RX] <<< {raw.hex()}")
-            self.buf.extend(raw)
-=======
         loop = asyncio.get_running_loop()
         fut:asyncio.Future[dict[str,Any]] = loop.create_future()
         req_msg_id = self.msg_ids.next()
@@ -296,8 +281,8 @@ class MTNet:
         obj={'act':act}; obj.update({k:v for k,v in kw.items() if v is not None})
         await self.send(obj, req_msg_id=req_msg_id)
         return await fut
+
     async def spin(self)->None:
         while not self.stop_ev.is_set():
             pkt = await self.read_packet()
             self._handle_encrypted_packet(pkt)
->>>>>>> theirs
