@@ -130,7 +130,7 @@ async def _mt_req_with_migrate(app: Any, act: str, **kw: Any) -> dict[str, Any]:
         await app.mt.boot()
         log.warning("Migrated MT auth request to dc%s %s:%s", dc_id, endpoint.host, endpoint.port)
 
-async def _mt_auth_flow(app: Any, vault: Path, api_id: int | str | None = None, api_hash: str | None = None) -> dict[str, str] | None:
+async def _mt_auth_flow(app: Any, vault: Path, session_name: str, api_id: int | str | None = None, api_hash: str | None = None) -> dict[str, str] | None:
     print("GoyGram interactive login")
     if api_id is None:
         api_id = await _ask_non_empty("Telegram API ID: ")
@@ -226,16 +226,16 @@ async def _mt_auth_flow(app: Any, vault: Path, api_id: int | str | None = None, 
                 "api_hash": api_hash,
             }
             vault.write_bytes(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode())
-            print("Success! Session saved to vault.bin")
-            log.info("Interactive login completed and session stored in vault.")
+            print(f"Success! Session saved to {vault.name}")
+            log.info("Interactive login completed and session stored in %s.", vault.name)
             return {"source": "interactive"}
 
 
-async def bootstrap_session(app: Any | None = None, api_id: int | str | None = None, api_hash: str | None = None) -> dict[str, str] | None:
-    vault = Path("vault.bin")
+async def bootstrap_session(app: Any | None = None, api_id: int | str | None = None, api_hash: str | None = None, session_name: str = "default") -> dict[str, str] | None:
+    vault = Path(f"{session_name}.vault")
     if vault.exists() and vault.stat().st_size > 0:
         if app is None or getattr(app, "mt", None) is None:
-            log.info("Vault detected. Session bootstrap completed without MT context.")
+            log.info("Vault %s detected. Session bootstrap completed without MT context.", vault.name)
             return {"source": "vault"}
         try:
             data = json.loads(vault.read_text())
@@ -248,16 +248,17 @@ async def bootstrap_session(app: Any | None = None, api_id: int | str | None = N
                 endpoint = pick_dc_endpoint(dc_map, preferred_dc=int(dc))
                 app.mt.host = endpoint.host
                 app.mt.port = endpoint.port
-            log.info("Vault detected. Session restored from vault into MT runtime.")
+            log.info("Vault %s detected. Session restored from vault into MT runtime.", vault.name)
             return {"source": "vault"}
         except Exception as e:
-            log.warning("Vault restore failed (%r), fallback to interactive auth.", e)
-    for sess in Path.cwd().glob("*.session"):
+            log.warning("Vault %s restore failed (%r), fallback to interactive auth.", vault.name, e)
+    sess = Path(f"{session_name}.session")
+    if sess.exists():
         log.info("Third-party session detected: %s", sess.name)
         _zeroize_and_remove(sess)
         vault.write_bytes(b"migrated")
-        log.info("Session migrated into vault and source file securely deleted.")
+        log.info("Session migrated into %s and source file securely deleted.", vault.name)
         return {"source": "session_migrated"}
     if app is None:
         raise RuntimeError("MT app context is required for interactive authorization")
-    return await _mt_auth_flow(app, vault, api_id=api_id, api_hash=api_hash)
+    return await _mt_auth_flow(app, vault, session_name=session_name, api_id=api_id, api_hash=api_hash)

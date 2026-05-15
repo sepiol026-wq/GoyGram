@@ -52,6 +52,25 @@ async def ping(msg):
 asyncio.run(app.run())
 ```
 
+
+### 3) Named MTProto sessions (multi-session in one folder)
+```python
+import asyncio
+from goygram import GoyGram
+
+app = GoyGram(
+    api_id=123456,
+    api_hash="0123456789abcdef0123456789abcdef",
+    session_name="farm_worker_1",
+)
+
+asyncio.run(app.run())
+```
+
+- By default, session data is stored in `default.vault`.
+- With `session_name="farm_worker_1"`, session data is stored in `farm_worker_1.vault`.
+- If `farm_worker_1.session` exists, it is migrated to `farm_worker_1.vault` during bootstrap.
+
 ## Dynamic API & Methods
 GoyGram now supports **all Telegram methods out of the box** with dynamic dispatch:
 

@@ -51,7 +51,7 @@ class AppCfg(BaseModel):
 
 
 class AppCore:
-    def __init__(self, cfg: AppCfg, api_id: int | str | None = None, api_hash: str | None = None) -> None:
+    def __init__(self, cfg: AppCfg, api_id: int | str | None = None, api_hash: str | None = None, session_name: str = "default") -> None:
         self.cfg = cfg
         self.bus = Bus(cfg.bus_max)
         self.bot = None
@@ -77,6 +77,7 @@ class AppCore:
         self.self_id: int | None = None
         self.api_id = api_id
         self.api_hash = api_hash
+        self.session_name = session_name
 
     def on_msg(self, fn: Fn | None = None, filt: Filter | None = None):
         def wrap(inner: Fn) -> Fn:
@@ -463,7 +464,7 @@ class AppCore:
         if self.mt:
             self.log.info("MT transport is enabled.")
             tasks.append(asyncio.create_task(self.mt.spin(), name="mt"))
-            await bootstrap_session(self, api_id=self.api_id, api_hash=self.api_hash)
+            await bootstrap_session(self, api_id=self.api_id, api_hash=self.api_hash, session_name=self.session_name)
         try:
             await self.stop_ev.wait()
         finally:
@@ -486,6 +487,7 @@ class GoyGram:
         bus_max: int = 0,
         api_id: int | str | None = None,
         api_hash: str | None = None,
+        session_name: str = "default",
     ) -> None:
         bot = BotCfg(token=bot_token, timeout=bot_timeout, base=bot_base) if bot_token is not None else None
         log = get_logger("goygram.dc")
@@ -504,7 +506,7 @@ class GoyGram:
                 log.warning("Using fallback MT endpoint %s:%s", resolved_host, resolved_port)
 
         mt = MtCfg(host=resolved_host, port=resolved_port, key=mt_key, iv=mt_iv) if resolved_host is not None and resolved_port is not None else None
-        self.core = AppCore(AppCfg(bot=bot, mt=mt, bus_max=bus_max), api_id=api_id, api_hash=api_hash)
+        self.core = AppCore(AppCfg(bot=bot, mt=mt, bus_max=bus_max), api_id=api_id, api_hash=api_hash, session_name=session_name)
 
     def on_msg(self, fn: Fn | None = None, filt: Filter | None = None):
         return self.core.on_msg(fn, filt=filt)
