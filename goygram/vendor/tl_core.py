@@ -33,10 +33,9 @@ class Reader:
         d=self.take(n); pad=(4-((head+n)%4))%4; self.take(pad); return d
 
 @dataclass
-class AbridgedTransport:
+class IntermediateTransport:
     def pack(self,payload:bytes)->bytes:
-        ln=len(payload)//4
-        return (bytes([ln]) if ln<127 else b'\x7f'+ln.to_bytes(3,'little'))+payload
+        return len(payload).to_bytes(4, 'little') + payload
 
 class MsgIdGen:
     def next(self)->int:

@@ -3,7 +3,7 @@ import asyncio, os, secrets, time, urllib.parse
 from hashlib import sha1
 from typing import Any
 
-from .tl_core import AbridgedTransport, MTCodec, MTMessage, MsgIdGen, Reader, factorize, kdf, kdf_msg, rsa_pad_encrypt
+from .tl_core import IntermediateTransport, MTCodec, MTMessage, MsgIdGen, Reader, factorize, kdf, kdf_msg, rsa_pad_encrypt
 
 try:
     from goygram.ext import _ext as rx
@@ -19,7 +19,7 @@ class MTNet:
         self.host=host; self.port=port; self.bus=bus; self.key=key; self.iv=iv
         self.rd=None; self.wr=None; self.buf=bytearray(); self.stop_ev=asyncio.Event(); self.seq=0
         self.pending:dict[int,asyncio.Future[dict[str,Any]]]={}
-        self.transport=AbridgedTransport(); self.codec=MTCodec(); self.msg_ids=MsgIdGen(); self.wrote_tag=False
+        self.transport=IntermediateTransport(); self.codec=MTCodec(); self.msg_ids=MsgIdGen(); self.wrote_tag=False
         self.auth_key:bytes|None=None; self.server_salt:bytes=b'\x00'*8; self.session_id=secrets.token_bytes(8)
 
     def pick(self,obj:dict[str,Any],*keys:str)->Any:
@@ -33,33 +33,41 @@ class MTNet:
     async def boot(self)->None:
         if self.rd and self.wr and not self.wr.is_closing(): return
         self.rd,self.wr=await asyncio.open_connection(self.host,self.port)
-        self.wr.write(b"\xef"); await self.wr.drain(); self.wrote_tag=True
+        self.wr.write(b"\xee\xee\xee\xee"); await self.wr.drain(); self.wrote_tag=True
 
     def cut(self)->list[bytes]:
         out=[]; i=0; raw=bytes(self.buf)
         while i < len(raw):
-            if i+1>len(raw): break
-            n1=raw[i]; i+=1
-            if n1==0x7f:
-                if i+3>len(raw): i-=1; break
-                ln=int.from_bytes(raw[i:i+3],'little'); i+=3
-            else: ln=n1
-            sz=ln*4
-            if i+sz>len(raw): i -= (4 if n1==0x7f else 1); break
-            out.append(raw[i:i+sz]); i+=sz
+            if i+4>len(raw): break
+            ln=int.from_bytes(raw[i:i+4], 'little'); i+=4
+            if i+ln>len(raw):
+                i -= 4
+                break
+            out.append(raw[i:i+ln]); i+=ln
         self.buf[:]=raw[i:]
         return out
+
+    def _log_socket_close(self)->None:
+        if self.buf:
+            print(f"[RX] Socket closed. Left in buffer: {self.buf.hex()}")
+            if len(self.buf) >= 4:
+                err = int.from_bytes(self.buf[:4], 'little', signed=True)
+                print(f"[RX] Possible Telegram int32 error: {err}")
 
     async def read_packet(self)->bytes:
         while True:
             for p in self.cut(): return p
             raw=await self.rd.read(65536)
-            if not raw: raise ConnectionError('mt socket closed')
+            if not raw:
+                self._log_socket_close()
+                raise ConnectionError('mt socket closed')
+            print(f"[RX] <<< {raw.hex()}")
             self.buf.extend(raw)
 
     async def invoke_unencrypted(self, body:bytes)->bytes:
         await self.boot(); assert self.wr
         pkt=self.pack(MTMessage.unencrypted(self.msg_ids.next(), body))
+        print(f"[TX] >>> {pkt.hex()}")
         self.wr.write(pkt); await self.wr.drain()
         resp=await self.read_packet(); return resp
 
@@ -116,6 +124,7 @@ class MTNet:
         aes_key,aes_iv=kdf_msg(self.auth_key,msg_key,True)
         enc=bytes(rx.aes_ige_enc_raw(m+pad,aes_key,aes_iv))
         pkt=self.pack(int.from_bytes(sha1(self.auth_key).digest()[-8:],'little').to_bytes(8,'little')+msg_key+enc)
+        print(f"[TX] >>> {pkt.hex()}")
         self.wr.write(pkt); await self.wr.drain()
 
 
@@ -132,4 +141,11 @@ class MTNet:
 
     async def call(self,act:str,**kw:Any)->dict[str,Any]:
         obj={'act':act}; obj.update({k:v for k,v in kw.items() if v is not None}); await self.send(obj); return {'ok':True,'act':act}
-    async def spin(self)->None: return
+    async def spin(self)->None:
+        while not self.stop_ev.is_set():
+            raw = await self.rd.read(65536)
+            if not raw:
+                self._log_socket_close()
+                raise ConnectionError('mt socket closed')
+            print(f"[RX] <<< {raw.hex()}")
+            self.buf.extend(raw)
