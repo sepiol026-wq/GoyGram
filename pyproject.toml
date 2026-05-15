@@ -5,7 +5,7 @@ build-backend = "maturin"
 
 [project]
 name = "goygram"
-version = "0.3.2"
+version = "0.3.4"
 description = "Goygram: unified Telegram runtime on Python and Rust"
 readme = "README.md"
 requires-python = ">=3.11"
