@@ -41,7 +41,8 @@ class BotNet:
             return
         mod = self.mod()
         self.sess = mod.ClientSession(
-            timeout=mod.ClientTimeout(total=self.timeout + 10)
+            timeout=mod.ClientTimeout(total=self.timeout + 10),
+            trust_env=True,
         )
 
     async def close(self) -> None:
@@ -242,6 +243,6 @@ class BotNet:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                self.log.error("Polling error: %s", e)
-                await self.bus.push("sys", {"kind": "err", "src": "bot", "text": str(e)})
+                self.log.error("Polling error: %r", e)
+                await self.bus.push("sys", {"kind": "err", "src": "bot", "text": repr(e)})
                 await asyncio.sleep(1.0)

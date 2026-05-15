@@ -39,14 +39,14 @@ class Disp:
                 try:
                     await fn(msg)
                 except Exception as e:
-                    self.log.error("Handler failure: %s", e)
-                    await self.bus.push("sys", {"kind": "err", "src": "disp", "text": str(e)})
+                    self.log.error("Handler failure: %r", e)
+                    await self.bus.push("sys", {"kind": "err", "src": "disp", "text": repr(e)})
             for fn in list(getattr(self.app, "cmd_hook", [])):
                 try:
                     await fn(msg)
                 except Exception as e:
-                    self.log.error("Handler failure: %s", e)
-                    await self.bus.push("sys", {"kind": "err", "src": "disp", "text": str(e)})
+                    self.log.error("Handler failure: %r", e)
+                    await self.bus.push("sys", {"kind": "err", "src": "disp", "text": repr(e)})
             return
         if kind == "poll":
             poll = PollObj(pkt.get("src", "sys"), data, self.app)
@@ -54,8 +54,8 @@ class Disp:
                 try:
                     await fn(poll)
                 except Exception as e:
-                    self.log.error("Handler failure: %s", e)
-                    await self.bus.push("sys", {"kind": "err", "src": "disp", "text": str(e)})
+                    self.log.error("Handler failure: %r", e)
+                    await self.bus.push("sys", {"kind": "err", "src": "disp", "text": repr(e)})
             return
         if kind == "cb":
             cb = CbObj(pkt.get("src", "sys"), data, self.app)
@@ -63,8 +63,8 @@ class Disp:
                 try:
                     await fn(cb)
                 except Exception as e:
-                    self.log.error("Handler failure: %s", e)
-                    await self.bus.push("sys", {"kind": "err", "src": "disp", "text": str(e)})
+                    self.log.error("Handler failure: %r", e)
+                    await self.bus.push("sys", {"kind": "err", "src": "disp", "text": repr(e)})
             return
         if kind != "member":
             return
@@ -73,8 +73,8 @@ class Disp:
             try:
                 await fn(mem)
             except Exception as e:
-                self.log.error("Handler failure: %s", e)
-                await self.bus.push("sys", {"kind": "err", "src": "disp", "text": str(e)})
+                self.log.error("Handler failure: %r", e)
+                await self.bus.push("sys", {"kind": "err", "src": "disp", "text": repr(e)})
 
     async def consume(self) -> None:
         while not self.stop_ev.is_set():
@@ -84,5 +84,5 @@ class Disp:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                self.log.error("Handler failure: %s", e)
-                await self.bus.push("sys", {"kind": "err", "src": "disp", "text": str(e)})
+                self.log.error("Handler failure: %r", e)
+                await self.bus.push("sys", {"kind": "err", "src": "disp", "text": repr(e)})

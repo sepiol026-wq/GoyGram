@@ -1,15 +1,26 @@
-# Copyleft 2026 github.com/sepiol026-wq | telegram:@samsepi0l_ovf. Licensed under AGPLv3.
+# CopyLeft 2026 github.com/sepiol026-wq | telegram:@samsepi0l_ovf. Licensed under AGPLv3.
 # Contains elements of Aiogram (MIT) / Pyrogram (LGPL-3.0)
 from __future__ import annotations
 
 import asyncio
 import json
+import os
+import urllib.parse
 from typing import Any
 
 try:
     from goygram.ext import _ext as rx
 except Exception:
     rx = None
+
+
+class ProxyCfg:
+    def __init__(self, scheme: str, host: str, port: int, user: str | None = None, pwd: str | None = None) -> None:
+        self.scheme = scheme
+        self.host = host
+        self.port = port
+        self.user = user
+        self.pwd = pwd
 
 
 class MTNet:
@@ -43,10 +54,89 @@ class MTNet:
                 return obj[key]
         return None
 
+    def proxy_cfg(self) -> ProxyCfg | None:
+        raw = os.getenv("ALL_PROXY") or os.getenv("all_proxy") or os.getenv("HTTPS_PROXY") or os.getenv("https_proxy") or os.getenv("HTTP_PROXY") or os.getenv("http_proxy")
+        if not raw:
+            return None
+        val = raw if "://" in raw else f"socks5://{raw}"
+        url = urllib.parse.urlparse(val)
+        host = url.hostname
+        if not host:
+            return None
+        scheme = (url.scheme or "socks5").lower()
+        if scheme not in {"socks5", "socks5h", "http", "https"}:
+            return None
+        port = int(url.port or (1080 if scheme.startswith("socks5") else 8080))
+        user = urllib.parse.unquote(url.username) if url.username else None
+        pwd = urllib.parse.unquote(url.password) if url.password else None
+        return ProxyCfg(scheme=scheme, host=host, port=port, user=user, pwd=pwd)
+
     async def boot(self) -> None:
         if self.rd and self.wr and not self.wr.is_closing():
             return
-        self.rd, self.wr = await asyncio.open_connection(self.host, self.port)
+        proxy = self.proxy_cfg()
+        if proxy is None:
+            self.rd, self.wr = await asyncio.open_connection(self.host, self.port)
+            return
+        self.rd, self.wr = await self.open_via_proxy(proxy)
+
+    async def open_via_proxy(self, proxy: ProxyCfg) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        rd, wr = await asyncio.open_connection(proxy.host, proxy.port)
+        try:
+            if proxy.scheme.startswith("socks5"):
+                await self.socks5_handshake(rd, wr, proxy)
+            else:
+                await self.http_connect_handshake(rd, wr, proxy)
+            return rd, wr
+        except Exception:
+            wr.close()
+            await wr.wait_closed()
+            raise
+
+    async def socks5_handshake(self, rd: asyncio.StreamReader, wr: asyncio.StreamWriter, proxy: ProxyCfg) -> None:
+        methods = [2] if proxy.user is not None else [0]
+        wr.write(bytes([5, len(methods), *methods]))
+        await wr.drain()
+        hello = await rd.readexactly(2)
+        if hello[0] != 5 or hello[1] == 0xFF:
+            raise ConnectionError("socks5 method negotiation failed")
+        if hello[1] == 2:
+            user = (proxy.user or "").encode()
+            pwd = (proxy.pwd or "").encode()
+            wr.write(bytes([1, len(user)]) + user + bytes([len(pwd)]) + pwd)
+            await wr.drain()
+            auth = await rd.readexactly(2)
+            if auth[1] != 0:
+                raise ConnectionError("socks5 auth failed")
+        host = self.host.encode()
+        req = bytes([5, 1, 0, 3, len(host)]) + host + self.port.to_bytes(2, "big")
+        wr.write(req)
+        await wr.drain()
+        rep = await rd.readexactly(4)
+        if rep[1] != 0:
+            raise ConnectionError(f"socks5 connect failed code={rep[1]}")
+        atyp = rep[3]
+        if atyp == 1:
+            await rd.readexactly(4 + 2)
+        elif atyp == 3:
+            n = await rd.readexactly(1)
+            await rd.readexactly(n[0] + 2)
+        elif atyp == 4:
+            await rd.readexactly(16 + 2)
+
+    async def http_connect_handshake(self, rd: asyncio.StreamReader, wr: asyncio.StreamWriter, proxy: ProxyCfg) -> None:
+        lines = [f"CONNECT {self.host}:{self.port} HTTP/1.1", f"Host: {self.host}:{self.port}"]
+        if proxy.user is not None:
+            import base64
+            token = base64.b64encode(f"{proxy.user}:{proxy.pwd or ''}".encode()).decode()
+            lines.append(f"Proxy-Authorization: Basic {token}")
+        req = "\r\n".join(lines) + "\r\n\r\n"
+        wr.write(req.encode())
+        await wr.drain()
+        head = await rd.readuntil(b"\r\n\r\n")
+        first = head.split(b"\r\n",1)[0].decode("latin1", "ignore")
+        if " 200 " not in first:
+            raise ConnectionError(f"http proxy connect failed: {first}")
 
     async def close(self) -> None:
         self.stop_ev.set()
@@ -170,7 +260,7 @@ class MTNet:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                await self.bus.push("sys", {"kind": "err", "src": "mt", "text": str(e)})
+                await self.bus.push("sys", {"kind": "err", "src": "mt", "text": repr(e)})
                 if self.wr and not self.wr.is_closing():
                     self.wr.close()
                     await self.wr.wait_closed()

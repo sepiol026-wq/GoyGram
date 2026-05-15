@@ -431,7 +431,7 @@ class AppCore:
             try:
                 await self.delete_webhook(drop_pending_updates=False)
             except Exception as e:
-                self.log.error("Failed to clear webhook before polling: %s", e)
+                self.log.error("Failed to clear webhook before polling: %r", e)
             tasks.append(asyncio.create_task(self.bot.spin(), name="bot"))
         if self.mt:
             self.log.info("MT transport is enabled.")
