@@ -1,9 +1,10 @@
-# Copyleft 2026 github.com/sepiol026-wq | telegram:@samsepi0l_ovf. Licensed under AGPLv3.
+# CopyLeft 2026 github.com/sepiol026-wq | telegram:@samsepi0l_ovf. Licensed under AGPLv3.
 from __future__ import annotations
 
 import asyncio
 import signal
 from collections.abc import Awaitable, Callable
+import logging
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
@@ -15,6 +16,9 @@ from goygram.types.cb import CbObj
 from goygram.types.member import MemberObj
 from goygram.types.msg import MsgObj
 from goygram.types.poll import PollObj
+from goygram.logging import get_logger
+from goygram.security import bootstrap_session
+from goygram.filters import Filter
 
 Fn = Callable[[MsgObj], Awaitable[Any]]
 CbFn = Callable[[CbObj], Awaitable[Any]]
@@ -67,10 +71,23 @@ class AppCore:
         self.poll_hook: list[PollFn] = []
         self.member_hook: list[MemFn] = []
         self.stop_ev = asyncio.Event()
+        self.log = get_logger("goygram.app")
+        self.self_id: int | None = None
 
-    def on_msg(self, fn: Fn) -> Fn:
-        self.hook.append(fn)
-        return fn
+    def on_msg(self, fn: Fn | None = None, filt: Filter | None = None):
+        def wrap(inner: Fn) -> Fn:
+            if filt is None:
+                self.hook.append(inner)
+                return inner
+            async def guarded(msg: MsgObj) -> Any:
+                if filt(msg):
+                    return await inner(msg)
+                return None
+            self.hook.append(guarded)
+            return inner
+        if fn is not None:
+            return wrap(fn)
+        return wrap
 
     def on_cb(self, fn: CbFn) -> CbFn:
         self.cb_hook.append(fn)
@@ -407,10 +424,18 @@ class AppCore:
                 loop.add_signal_handler(sig, self.stop)
             except Exception:
                 continue
+        self.log.info("Starting GoyGram core.")
         tasks = [asyncio.create_task(self.disp.consume(), name="disp")]
         if self.bot:
+            self.log.info("Bot transport is enabled.")
+            try:
+                await self.delete_webhook(drop_pending_updates=False)
+            except Exception as e:
+                self.log.error("Failed to clear webhook before polling: %s", e)
             tasks.append(asyncio.create_task(self.bot.spin(), name="bot"))
         if self.mt:
+            self.log.info("MT transport is enabled.")
+            bootstrap_session()
             tasks.append(asyncio.create_task(self.mt.spin(), name="mt"))
         try:
             await self.stop_ev.wait()

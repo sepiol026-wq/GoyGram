@@ -1,9 +1,11 @@
-# Copyleft 2026 github.com/sepiol026-wq | telegram:@samsepi0l_ovf. Licensed under AGPLv3.
+# CopyLeft 2026 github.com/sepiol026-wq | telegram:@samsepi0l_ovf. Licensed under AGPLv3.
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
+
+from goygram.logging import get_logger
 
 from goygram.types.cb import CbObj
 from goygram.types.member import MemberObj
@@ -21,6 +23,7 @@ class Disp:
         self.app = app
         self.bus = bus
         self.stop_ev = asyncio.Event()
+        self.log = get_logger("goygram.disp")
 
     async def close(self) -> None:
         self.stop_ev.set()
@@ -36,11 +39,13 @@ class Disp:
                 try:
                     await fn(msg)
                 except Exception as e:
+                    self.log.error("Handler failure: %s", e)
                     await self.bus.push("sys", {"kind": "err", "src": "disp", "text": str(e)})
             for fn in list(getattr(self.app, "cmd_hook", [])):
                 try:
                     await fn(msg)
                 except Exception as e:
+                    self.log.error("Handler failure: %s", e)
                     await self.bus.push("sys", {"kind": "err", "src": "disp", "text": str(e)})
             return
         if kind == "poll":
@@ -49,6 +54,7 @@ class Disp:
                 try:
                     await fn(poll)
                 except Exception as e:
+                    self.log.error("Handler failure: %s", e)
                     await self.bus.push("sys", {"kind": "err", "src": "disp", "text": str(e)})
             return
         if kind == "cb":
@@ -57,6 +63,7 @@ class Disp:
                 try:
                     await fn(cb)
                 except Exception as e:
+                    self.log.error("Handler failure: %s", e)
                     await self.bus.push("sys", {"kind": "err", "src": "disp", "text": str(e)})
             return
         if kind != "member":
@@ -66,6 +73,7 @@ class Disp:
             try:
                 await fn(mem)
             except Exception as e:
+                self.log.error("Handler failure: %s", e)
                 await self.bus.push("sys", {"kind": "err", "src": "disp", "text": str(e)})
 
     async def consume(self) -> None:
@@ -76,4 +84,5 @@ class Disp:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
+                self.log.error("Handler failure: %s", e)
                 await self.bus.push("sys", {"kind": "err", "src": "disp", "text": str(e)})

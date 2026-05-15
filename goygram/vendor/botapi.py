@@ -1,10 +1,12 @@
-# Copyleft 2026 github.com/sepiol026-wq | telegram:@samsepi0l_ovf. Licensed under AGPLv3.
+# CopyLeft 2026 github.com/sepiol026-wq | telegram:@samsepi0l_ovf. Licensed under AGPLv3.
 # Contains elements of Aiogram (MIT) / Pyrogram (LGPL-3.0)
 from __future__ import annotations
 
 import asyncio
 import json
 from typing import Any
+
+from goygram.logging import get_logger
 
 try:
     import aiohttp
@@ -27,6 +29,7 @@ class BotNet:
         self.sess: Any | None = None
         self.off = 0
         self.stop_ev = asyncio.Event()
+        self.log = get_logger("goygram.botapi")
 
     def mod(self) -> Any:
         if aiohttp is None:
@@ -53,6 +56,7 @@ class BotNet:
         await self.boot()
         assert self.sess is not None
         body = self.body(data or {})
+        self.log.debug("Outgoing request method=%s payload=%s", m, data)
         async with self.sess.post(f"{self.base}/{m}", **body) as r:
             try:
                 raw = await r.json(content_type=None)
@@ -63,6 +67,10 @@ class BotNet:
                 except Exception:
                     raw = {"ok": False, "text": txt}
         if r.status >= 400:
+            if r.status == 409 and m == "getUpdates":
+                await self.req("deleteWebhook", {"drop_pending_updates": False})
+                self.log.error("Webhook conflict detected. Webhook deleted and polling will retry.")
+                return []
             raise RuntimeError(f"botapi {m} http {r.status}: {raw}")
         if not raw.get("ok"):
             raise RuntimeError(f"botapi {m} fail: {raw}")
@@ -229,9 +237,11 @@ class BotNet:
                     pkt = self.norm(upd)
                     if not pkt:
                         continue
+                    self.log.debug("Incoming packet: %s", pkt)
                     await self.bus.push("bot", pkt)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
+                self.log.error("Polling error: %s", e)
                 await self.bus.push("sys", {"kind": "err", "src": "bot", "text": str(e)})
                 await asyncio.sleep(1.0)
