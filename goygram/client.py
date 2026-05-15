@@ -5,7 +5,7 @@ import asyncio
 import signal
 from collections.abc import Awaitable, Callable
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -19,6 +19,7 @@ from goygram.types.poll import PollObj
 from goygram.logging import get_logger
 from goygram.security import bootstrap_session
 from goygram.filters import Filter
+from goygram.utils import print_methods
 
 Fn = Callable[[MsgObj], Awaitable[Any]]
 CbFn = Callable[[CbObj], Awaitable[Any]]
@@ -117,10 +118,33 @@ class AppCore:
             return fn
         return wrap
 
+    def _bot_method_name(self, name: str) -> str:
+        if "_" in name:
+            parts = name.split("_")
+            return parts[0] + "".join(x[:1].upper() + x[1:] for x in parts[1:])
+        return name
+
+    def _dynamic_method(self, name: str):
+        async def call(**kw: Any) -> Any:
+            if name.startswith("mt_"):
+                return await self.mt_req(name[3:], **kw)
+            return await self.bot_req(self._bot_method_name(name), **kw)
+        return call
+
+    def help(self) -> None:
+        print_methods(self)
+
     def __getattr__(self, name: str) -> Any:
-        if self.api is not None:
+        if self.api is not None and hasattr(self.api, name):
             return getattr(self.api, name)
+        if (self.bot is not None and not name.startswith("mt_")) or (self.mt is not None and name.startswith("mt_")):
+            return self._dynamic_method(name)
         raise AttributeError(name)
+
+    def __dir__(self) -> list[str]:
+        base = set(super().__dir__())
+        base.update({"help", "sendDocument", "getChat", "getUpdates", "mt_get_dialogs"})
+        return sorted(base)
 
     def stop(self) -> None:
         self.stop_ev.set()
@@ -462,8 +486,24 @@ class GoyGram:
         mt = MtCfg(host=mt_host, port=mt_port, key=mt_key, iv=mt_iv) if mt_host is not None and mt_port is not None else None
         self.core = AppCore(AppCfg(bot=bot, mt=mt, bus_max=bus_max))
 
-    def on_msg(self, fn: Fn) -> Fn:
-        return self.core.on_msg(fn)
+    def on_msg(self, fn: Fn | None = None, filt: Filter | None = None):
+        return self.core.on_msg(fn, filt=filt)
+
+    def _bot_method_name(self, name: str) -> str:
+        if "_" in name:
+            parts = name.split("_")
+            return parts[0] + "".join(x[:1].upper() + x[1:] for x in parts[1:])
+        return name
+
+    def _dynamic_method(self, name: str):
+        async def call(**kw: Any) -> Any:
+            if name.startswith("mt_"):
+                return await self.mt_req(name[3:], **kw)
+            return await self.bot_req(self._bot_method_name(name), **kw)
+        return call
+
+    def help(self) -> None:
+        print_methods(self)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.core, name)
@@ -479,6 +519,12 @@ class GoyGram:
 
     def on_member(self, fn: MemFn) -> MemFn:
         return self.core.on_member(fn)
+
+    def help(self) -> None:
+        self.core.help()
+
+    def __dir__(self) -> list[str]:
+        return sorted(set(super().__dir__()) | set(dir(self.core)))
 
     async def send_msg(
         self,
@@ -569,6 +615,11 @@ class GoyGram:
 
     def md(self, text: str) -> dict[str, Any]:
         return self.core.md(text)
+
+    def __dir__(self) -> list[str]:
+        base = set(super().__dir__())
+        base.update({"help", "sendDocument", "getChat", "getUpdates", "mt_get_dialogs"})
+        return sorted(base)
 
     def stop(self) -> None:
         self.core.stop()
