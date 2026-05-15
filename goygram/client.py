@@ -460,7 +460,7 @@ class AppCore:
             tasks.append(asyncio.create_task(self.bot.spin(), name="bot"))
         if self.mt:
             self.log.info("MT transport is enabled.")
-            bootstrap_session()
+            await bootstrap_session(self)
             tasks.append(asyncio.create_task(self.mt.spin(), name="mt"))
         try:
             await self.stop_ev.wait()
