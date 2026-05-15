@@ -7,6 +7,7 @@ import base64
 import json
 import os
 import re
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -255,10 +256,43 @@ async def bootstrap_session(app: Any | None = None, api_id: int | str | None = N
     sess = Path(f"{session_name}.session")
     if sess.exists():
         log.info("Third-party session detected: %s", sess.name)
-        _zeroize_and_remove(sess)
-        vault.write_bytes(b"migrated")
-        log.info("Session migrated into %s and source file securely deleted.", vault.name)
-        return {"source": "session_migrated"}
+        try:
+            conn = sqlite3.connect(str(sess))
+            try:
+                cur = conn.cursor()
+                row = cur.execute(
+                    "SELECT dc_id, auth_key, user_id, api_id, test_mode FROM sessions LIMIT 1"
+                ).fetchone()
+                if row is None:
+                    row = cur.execute("SELECT dc_id, auth_key FROM sessions LIMIT 1").fetchone()
+                if row is None:
+                    raise ValueError("sessions table is empty")
+            finally:
+                conn.close()
+
+            dc_id = row[0] if len(row) > 0 else None
+            auth_val = row[1] if len(row) > 1 else None
+            user_id = row[2] if len(row) > 2 else None
+            src_api_id = row[3] if len(row) > 3 else None
+            test_mode = row[4] if len(row) > 4 else None
+            auth_blob = _extract_auth_blob({"auth_key": auth_val})
+            if auth_blob is None:
+                raise ValueError("auth_key not found or invalid in sessions table")
+
+            payload: dict[str, Any] = {
+                "auth_key": auth_blob.hex(),
+                "dc": int(dc_id) if dc_id is not None else None,
+                "user_id": user_id,
+                "api_id": src_api_id,
+                "test_mode": test_mode,
+                "source_session": sess.name,
+            }
+            vault.write_bytes(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode())
+            _zeroize_and_remove(sess)
+            log.info("Session migrated into %s and source file securely deleted.", vault.name)
+            return {"source": "session_migrated"}
+        except Exception as e:
+            log.warning("Session migration failed for %s (%r).", sess.name, e)
     if app is None:
         raise RuntimeError("MT app context is required for interactive authorization")
     return await _mt_auth_flow(app, vault, session_name=session_name, api_id=api_id, api_hash=api_hash)

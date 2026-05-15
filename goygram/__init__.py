@@ -9,4 +9,4 @@ __all__ = ["GoyGram", "InlineKbd", "ReplyKbd", "Btn", "ForceReply", "ReplyGone",
 
 from . import filters
 
-__version__ = "0.4.2"
+__version__ = "0.4.7"
