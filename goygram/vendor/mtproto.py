@@ -1,6 +1,8 @@
+# CopyLeft 2026 github.com/sepiol026-wq | telegram:@samsepi0l_ovf. Licensed under AGPLv3.
+# Contains elements of Aiogram (MIT) / Pyrogram (LGPL-3.0)
 from __future__ import annotations
-import asyncio, os, secrets, time, urllib.parse
-from hashlib import sha1
+import asyncio, os, secrets, urllib.parse
+from hashlib import sha1, sha256
 from typing import Any
 
 from .tl_core import IntermediateTransport, MTCodec, MTMessage, MsgIdGen, Reader, factorize, kdf, kdf_msg, rsa_pad_encrypt
@@ -28,6 +30,7 @@ class MTNet:
         return None
 
     def pack(self, raw:bytes)->bytes: return self.transport.pack(raw)
+
     def proxy_cfg(self)->ProxyCfg|None:
         raw = os.getenv("ALL_PROXY") or os.getenv("all_proxy")
         if not raw:
@@ -134,11 +137,10 @@ class MTNet:
         if self.auth_key is not None: return
         nonce=secrets.token_bytes(16)
         res=self._read_unencrypted_body(await self.invoke_unencrypted(self.codec.req_pq_multi(nonce)))
-        rr=Reader(res); cid=rr.u32();
+        rr=Reader(res); cid=rr.u32()
         if cid != 0x05162463: raise RuntimeError(f'unexpected resPQ cid={cid:x}')
         n=rr.take(16); server_nonce=rr.take(16); pq=rr.tl_bytes(); _vec=rr.u32(); cnt=rr.i32(); fps=[rr.i64() for _ in range(cnt)]
         if n!=nonce: raise RuntimeError('nonce mismatch')
-        # Telegram RSA key #1 (ported from pyrogram.crypto.rsa)
         fp=-4344800451088585951
         if fp not in fps: fp=fps[0]
         n_mod=int('C150023E2F70DB7985DED064759CFECF0AF328E69A41DAF4D6F01B538135A6F91F8F8B2A0EC9BA9720CE352EFCF6C5680FFC424BD634864902DE0B4BD6D49F4E580230E3AE97D95C8B19442B3C0A10D8F5633FECEDD6926A7F6DAB0DDB7D457F9EA81B8465FCD6FFFEED114011DF91C059CAEDAF97625F6C96ECC74725556934EF781D866B34F011FCE4D835A090196E9A5F0E4449AF7EB697DDB9076494CA5F81104A305B6DD27665722C46B60E5DF680FB16B210607EF217652E60236C255F6A28315F4083A96791D7214BF64C1DF4FD0DB1944FB26A2A57031B32EEE64AD15A8BA68885CDE74A5BFC920F6ABF59BA5C75506373E7130F9042DA922179251F',16)
@@ -148,11 +150,12 @@ class MTNet:
         inner=self.codec.p_q_inner_data_dc(pq=pq,p=p.to_bytes(4,'big'),q=q.to_bytes(4,'big'),nonce=nonce,server_nonce=server_nonce,new_nonce=new_nonce,dc=2)
         enc=rsa_pad_encrypt(inner,n_mod,e)
         dh=self._read_unencrypted_body(await self.invoke_unencrypted(self.codec.req_dh_params(nonce=nonce,server_nonce=server_nonce,p=p.to_bytes(4,'big'),q=q.to_bytes(4,'big'),fp=fp,encrypted_data=enc)))
-        rd=Reader(dh); dcid=rd.u32();
+        rd=Reader(dh); dcid=rd.u32()
         if dcid!=0xd0e8075c: raise RuntimeError(f'unexpected dh params cid={dcid:x}')
         _=rd.take(16); _=rd.take(16); encrypted_answer=rd.tl_bytes()
         tmp_key,tmp_iv=kdf(new_nonce,server_nonce)
-        dec=bytes(rx.aes_ige_dec_raw(encrypted_answer,tmp_key,tmp_iv)) if rx else b''
+        if rx is None: raise RuntimeError('rx (goygram.ext._ext) is not available; cannot decrypt DH answer')
+        dec=bytes(rx.aes_ige_dec_raw(encrypted_answer,tmp_key,tmp_iv))
         answer=dec[20:]
         ra=Reader(answer); aid=ra.u32()
         if aid!=0xb5890dba: raise RuntimeError('unexpected server_DH_inner_data')
@@ -160,7 +163,7 @@ class MTNet:
         b=int.from_bytes(secrets.token_bytes(256),'big'); g_b=pow(g,b,dh_prime).to_bytes(256,'big')
         cli=self.codec.client_dh_inner(nonce=nonce,server_nonce=server_nonce,retry_id=0,g_b=g_b)
         payload=sha1(cli).digest()+cli; payload+=b'\x00'*((16-len(payload)%16)%16)
-        enc2=bytes(rx.aes_ige_enc_raw(payload,tmp_key,tmp_iv)) if rx else b''
+        enc2=bytes(rx.aes_ige_enc_raw(payload,tmp_key,tmp_iv))
         ans=self._read_unencrypted_body(await self.invoke_unencrypted(self.codec.set_client_dh_params(nonce=nonce,server_nonce=server_nonce,encrypted_data=enc2)))
         c=Reader(ans).u32()
         if c!=0x3bcbf734: raise RuntimeError(f'dh_gen not ok: {c:x}')
@@ -168,29 +171,21 @@ class MTNet:
         self.server_salt=bytes(a^b for a,b in zip(new_nonce[:8],server_nonce[:8]))
 
     def _parse_phone_code_hash(self, result:bytes)->str|None:
-        # auth.sentCode: constructor + flags + type + phone_code_hash + ...
-        # We keep this parser intentionally small and tolerant to schema drift.
         try:
             r = Reader(result)
             _cid = r.u32()
             _flags = r.i32()
-            # Skip auth.SentCodeType object (constructor + best-effort fields).
             st = r.u32()
             if st in {0x9fd736, 0x3dbb5986, 0xc000bba2, 0x5353e5a7, 0xab03c6d9}:
-                # Known variants usually carry either one int or a pattern string.
                 if st in {0x3dbb5986, 0xc000bba2, 0x9fd736, 0xab03c6d9}:
                     _ = r.i32()
                 elif st == 0x5353e5a7:
                     _ = r.tl_bytes()
-            else:
-                # Unknown sentCodeType; continue with heuristic below.
-                pass
             v = r.tl_bytes().decode("utf-8", errors="ignore")
             if v:
                 return v
         except Exception:
             pass
-        # Heuristic fallback: locate first plausible TL-string token in payload.
         i = 0
         while i < len(result):
             n0 = result[i]
@@ -231,7 +226,7 @@ class MTNet:
             return
         rm = Reader(msg)
         cid = rm.u32()
-        if cid != 0xf35c6d01:  # rpc_result
+        if cid != 0xf35c6d01:
             return
         req_msg_id = rm.i64()
         result = msg[12:]
@@ -244,11 +239,13 @@ class MTNet:
         else:
             fut.set_result({"ok": True, "raw_result_hex": result.hex()})
 
-    async def send(self,obj:dict[str,Any], req_msg_id:int|None=None)->int:
+    async def send(self, obj:dict[str,Any], req_msg_id:int|None=None)->int:
         await self.ensure_auth_key()
+        if rx is None: raise RuntimeError('rx (goygram.ext._ext) is not available; cannot encrypt')
         if obj.get('act') not in {'auth.sendCode','auth_send_code'}: raise NotImplementedError(obj.get('act'))
         body=self.codec.auth_send_code(str(obj.get('phone_number') or obj.get('phone')), int(obj['api_id']), str(obj['api_hash']))
-        msg_id=req_msg_id if req_msg_id is not None else self.msg_ids.next(); seq_no=1
+        msg_id=req_msg_id if req_msg_id is not None else self.msg_ids.next()
+        self.seq += 1; seq_no = self.seq * 2 - 1
         m=b''
         m += self.server_salt + self.session_id + msg_id.to_bytes(8,'little',signed=True) + seq_no.to_bytes(4,'little',signed=True)
         m += len(body).to_bytes(4,'little',signed=True) + body
@@ -261,7 +258,6 @@ class MTNet:
         self.wr.write(pkt); await self.wr.drain()
         return msg_id
 
-
     async def close(self)->None:
         if self.wr:
             self.wr.close(); await self.wr.wait_closed()
@@ -273,16 +269,27 @@ class MTNet:
     async def del_msg(self, chat_id:int|str, msg_id:int)->dict[str,Any]:
         raise NotImplementedError('del_msg over MT not mapped yet')
 
-    async def call(self,act:str,**kw:Any)->dict[str,Any]:
+    async def call(self, act:str, **kw:Any)->dict[str,Any]:
         loop = asyncio.get_running_loop()
         fut:asyncio.Future[dict[str,Any]] = loop.create_future()
         req_msg_id = self.msg_ids.next()
         self.pending[req_msg_id] = fut
         obj={'act':act}; obj.update({k:v for k,v in kw.items() if v is not None})
         await self.send(obj, req_msg_id=req_msg_id)
-        return await fut
+        try:
+            return await asyncio.wait_for(fut, timeout=30.0)
+        except asyncio.TimeoutError:
+            self.pending.pop(req_msg_id, None)
+            raise TimeoutError(f'no response for act={act} msg_id={req_msg_id}')
 
     async def spin(self)->None:
         while not self.stop_ev.is_set():
-            pkt = await self.read_packet()
-            self._handle_encrypted_packet(pkt)
+            try:
+                pkt = await self.read_packet()
+                self._handle_encrypted_packet(pkt)
+            except ConnectionError as exc:
+                for fut in self.pending.values():
+                    if not fut.done():
+                        fut.set_exception(exc)
+                self.pending.clear()
+                raise
