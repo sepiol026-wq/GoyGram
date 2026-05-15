@@ -5,7 +5,7 @@ build-backend = "maturin"
 
 [project]
 name = "goygram"
-version = "0.3.8"
+version = "0.3.9"
 description = "Goygram: unified Telegram runtime on Python and Rust"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,4 +16,3 @@ manifest-path = "ext_rust/Cargo.toml"
 python-source = "."
 module-name = "goygram.ext"
 bindings = "pyo3"
-

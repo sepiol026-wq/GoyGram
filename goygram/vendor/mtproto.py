@@ -42,6 +42,7 @@ class MTNet:
         self.buf = bytearray()
         self.stop_ev = asyncio.Event()
         self.seq = 0
+        self.pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
 
     def need_rx(self) -> Any:
         if rx is None:
@@ -202,10 +203,16 @@ class MTNet:
 
     async def call(self, act: str, **kw: Any) -> dict[str, Any]:
         self.seq += 1
-        obj = {"act": act, "id": self.seq}
+        req_id = self.seq
+        obj = {"act": act, "id": req_id}
         obj.update({k: v for k, v in kw.items() if v is not None})
+        fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        self.pending[req_id] = fut
         await self.send(obj)
-        return obj
+        try:
+            return await fut
+        finally:
+            self.pending.pop(req_id, None)
 
     async def send_msg(
         self,
@@ -256,10 +263,19 @@ class MTNet:
                     obj = json.loads(dec.decode("utf-8"))
                     if not isinstance(obj, dict):
                         continue
+                    msg_id = self.pick(obj, "id", "req_id", "msg_id")
+                    if isinstance(msg_id, int) and msg_id in self.pending:
+                        fut = self.pending[msg_id]
+                        if not fut.done():
+                            fut.set_result(obj)
                     await self.bus.push("mt", self.norm(obj))
             except asyncio.CancelledError:
                 raise
             except Exception as e:
+                for fut in self.pending.values():
+                    if not fut.done():
+                        fut.set_exception(e)
+                self.pending.clear()
                 await self.bus.push("sys", {"kind": "err", "src": "mt", "text": repr(e)})
                 if self.wr and not self.wr.is_closing():
                     self.wr.close()
