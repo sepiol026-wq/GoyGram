@@ -1,7 +1,7 @@
 # CopyLeft 2026 github.com/sepiol026-wq | telegram:@samsepi0l_ovf. Licensed under AGPLv3.
 # Contains elements of Aiogram (MIT) / Pyrogram (LGPL-3.0)
 from __future__ import annotations
-import asyncio, os, secrets, urllib.parse
+import asyncio, os, secrets, struct, urllib.parse
 from hashlib import sha1, sha256
 from typing import Any
 
@@ -11,6 +11,102 @@ try:
     from goygram.ext import _ext as rx
 except Exception:
     rx = None
+
+
+
+def _tl_bytes_at(b:bytes, p:int)->tuple[bytes,int]:
+    n0 = b[p]
+    p += 1
+    if n0 == 254:
+        n = int.from_bytes(b[p:p+3], "little")
+        p += 3
+        head = 4
+    else:
+        n = n0
+        head = 1
+    d = b[p:p+n]
+    p += n
+    pad = (4 - ((head + n) % 4)) % 4
+    p += pad
+    return d, p
+
+
+def _skip_tl_object(b:bytes, p:int)->int:
+    if p + 4 > len(b):
+        return len(b)
+    cid = int.from_bytes(b[p:p+4], "little")
+    p += 4
+    if cid == 0x1cb5c415:
+        if p + 4 > len(b):
+            return len(b)
+        cnt = int.from_bytes(b[p:p+4], "little", signed=True)
+        p += 4
+        for _ in range(max(cnt, 0)):
+            p = _skip_tl_object(b, p)
+        return p
+    if cid in {0x997275b5, 0xbc799737}:
+        return p
+    if cid == 0x2144ca19:
+        p += 4
+        _, p = _tl_bytes_at(b, p)
+        return p
+    if cid in {0xb5757299, 0x44747e9a}:
+        flags = int.from_bytes(b[p:p+4], "little", signed=True); p += 4
+        p += 8
+        _, p = _tl_bytes_at(b, p)
+        _, p = _tl_bytes_at(b, p)
+        if flags & (1 << 1):
+            _, p = _tl_bytes_at(b, p)
+        if flags & (1 << 4):
+            _, p = _tl_bytes_at(b, p)
+        _, p = _tl_bytes_at(b, p)
+        if flags & (1 << 0):
+            p += 4
+        _, p = _tl_bytes_at(b, p)
+        _, p = _tl_bytes_at(b, p)
+        _, p = _tl_bytes_at(b, p)
+        p += 4
+        if flags & (1 << 2):
+            p += 4
+        if flags & (1 << 3):
+            p += 4
+        if flags & (1 << 5):
+            p += 4
+        if flags & (1 << 6):
+            p += 4
+        return p
+    return len(b)
+
+
+def _parse_user_obj(b:bytes)->dict[str,Any]|None:
+    if len(b) < 12:
+        return None
+    cid = int.from_bytes(b[:4], "little")
+    if cid != 0x20b1422:
+        return None
+    p = 4
+    flags = int.from_bytes(b[p:p+4], "little", signed=True); p += 4
+    user_id = int.from_bytes(b[p:p+8], "little", signed=True); p += 8
+    if flags & (1 << 0):
+        _, p = _tl_bytes_at(b, p)
+    if flags & (1 << 1):
+        _, p = _tl_bytes_at(b, p)
+    if flags & (1 << 2):
+        _, p = _tl_bytes_at(b, p)
+    username = None
+    if flags & (1 << 3):
+        u, p = _tl_bytes_at(b, p)
+        username = u.decode("utf-8", errors="ignore")
+    phone = None
+    if flags & (1 << 4):
+        ph, p = _tl_bytes_at(b, p)
+        phone = ph.decode("utf-8", errors="ignore")
+    out = {"id": user_id}
+    if username:
+        out["username"] = username
+    if phone:
+        out["phone"] = phone
+    return out
 
 class ProxyCfg:
     def __init__(self, scheme:str, host:str, port:int, user:str|None=None, pwd:str|None=None)->None:
@@ -233,11 +329,61 @@ class MTNet:
         fut = self.pending.pop(req_msg_id, None)
         if not fut or fut.done():
             return
+        parsed = self._parse_rpc_result(result)
+        fut.set_result(parsed)
+
+    def _parse_auth_result(self, result:bytes)->dict[str,Any]|None:
+        if len(result) < 8:
+            return None
+        cid = int.from_bytes(result[:4], "little")
+        if cid not in {0xb5757299, 0x44747e9a}:
+            return None
+        p = 4
+        flags = int.from_bytes(result[p:p+4], "little", signed=True); p += 4
+        p += 8
+        _, p = _tl_bytes_at(result, p)
+        _, p = _tl_bytes_at(result, p)
+        if flags & (1 << 1):
+            _, p = _tl_bytes_at(result, p)
+        if flags & (1 << 4):
+            _, p = _tl_bytes_at(result, p)
+        _, p = _tl_bytes_at(result, p)
+        if flags & (1 << 0):
+            p += 4
+        _, p = _tl_bytes_at(result, p)
+        _, p = _tl_bytes_at(result, p)
+        _, p = _tl_bytes_at(result, p)
+        p += 4
+        if flags & (1 << 2):
+            p += 4
+        if flags & (1 << 3):
+            p += 4
+        if flags & (1 << 5):
+            p += 4
+        if flags & (1 << 6):
+            p += 4
+        user = _parse_user_obj(result[p:])
+        out = {"ok": True, "auth_key": self.auth_key or b""}
+        if user is not None:
+            out["user"] = user
+        return out
+
+    def _parse_rpc_result(self, result:bytes)->dict[str,Any]:
+        if len(result) >= 4:
+            cid = int.from_bytes(result[:4], "little")
+            if cid == 0x2144ca19:
+                r = Reader(result)
+                _ = r.u32()
+                ec = r.i32()
+                em = r.tl_bytes().decode("utf-8", errors="ignore")
+                return {"ok": False, "error_code": ec, "error": em, "error_message": em}
         phone_code_hash = self._parse_phone_code_hash(result)
         if phone_code_hash:
-            fut.set_result({"phone_code_hash": phone_code_hash})
-        else:
-            fut.set_result({"ok": True, "raw_result_hex": result.hex()})
+            return {"ok": True, "phone_code_hash": phone_code_hash}
+        auth = self._parse_auth_result(result)
+        if auth is not None:
+            return auth
+        return {"ok": True, "raw_result_hex": result.hex()}
 
     async def send(self, obj:dict[str,Any], req_msg_id:int|None=None)->int:
         await self.ensure_auth_key()
@@ -253,6 +399,10 @@ class MTNet:
             )
         elif act in {'auth.checkPassword', 'auth_check_password'}:
             body=self.codec.auth_check_password(str(obj.get('password') or ''))
+        elif act == 'send_msg':
+            raise RuntimeError('send_msg is not available in low-level MT auth transport')
+        elif act == 'del_msg':
+            raise RuntimeError('del_msg is not available in low-level MT auth transport')
         else:
             raise NotImplementedError(act)
         msg_id=req_msg_id if req_msg_id is not None else self.msg_ids.next()

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import getpass
+import base64
 import json
 import os
 import re
@@ -92,7 +93,13 @@ def _extract_auth_blob(obj: dict[str, Any]) -> bytes | None:
     if isinstance(auth_key, (bytes, bytearray)):
         return bytes(auth_key)
     if isinstance(auth_key, str) and auth_key:
-        return auth_key.encode()
+        try:
+            return bytes.fromhex(auth_key)
+        except ValueError:
+            try:
+                return base64.b64decode(auth_key.encode(), validate=True)
+            except Exception:
+                return auth_key.encode()
     return None
 
 
@@ -204,6 +211,8 @@ async def _mt_auth_flow(app: Any, vault: Path, api_id: int | str | None = None, 
 
             user = _extract_user(final)
             auth_blob = _extract_auth_blob(final)
+            if auth_blob is None and getattr(app, "mt", None) is not None:
+                auth_blob = getattr(app.mt, "auth_key", None)
             if user is None or auth_blob is None:
                 print("Authorization did not return finalized user/session data")
                 continue
@@ -211,7 +220,7 @@ async def _mt_auth_flow(app: Any, vault: Path, api_id: int | str | None = None, 
             payload = {
                 "phone": phone,
                 "user": user,
-                "auth_key": auth_blob.decode("utf-8", errors="ignore"),
+                "auth_key": auth_blob.hex(),
                 "dc": _field(final, "dc_id", "dc"),
                 "api_id": api_id,
                 "api_hash": api_hash,
@@ -232,7 +241,7 @@ async def bootstrap_session(app: Any | None = None, api_id: int | str | None = N
             data = json.loads(vault.read_text())
             auth_key = data.get("auth_key")
             if isinstance(auth_key, str) and auth_key:
-                app.mt.auth_key = auth_key.encode("utf-8")
+                app.mt.auth_key = _extract_auth_blob({"auth_key": auth_key})
             dc = data.get("dc")
             if dc is not None:
                 dc_map = get_dynamic_dc_config()
