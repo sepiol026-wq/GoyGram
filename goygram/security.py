@@ -1,6 +1,7 @@
 # CopyLeft 2026 github.com/sepiol026-wq | telegram:@samsepi0l_ovf. Licensed under AGPLv3.
 from __future__ import annotations
 
+import asyncio
 import getpass
 import json
 import os
@@ -8,6 +9,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from goygram.dc_fetcher import get_dynamic_dc_config, pick_dc_endpoint
 from goygram.logging import get_logger
 
 log = get_logger("goygram.security")
@@ -22,9 +24,9 @@ def _zeroize_and_remove(path: Path) -> None:
     path.unlink(missing_ok=True)
 
 
-def _ask_non_empty(prompt: str) -> str:
+async def _ask_non_empty(prompt: str) -> str:
     while True:
-        val = input(prompt).strip()
+        val = (await asyncio.to_thread(input, prompt)).strip()
         if val:
             return val
         print("Input cannot be empty")
@@ -94,10 +96,43 @@ def _extract_auth_blob(obj: dict[str, Any]) -> bytes | None:
     return None
 
 
-async def _mt_auth_flow(app: Any, vault: Path) -> dict[str, str] | None:
-    print("GoyGram interactive login")
+
+
+def _extract_migrate_dc(err_text: str) -> int | None:
+    m = re.search(r"(?:PHONE|NETWORK)_MIGRATE_(\d+)", err_text.upper())
+    if not m:
+        return None
+    return int(m.group(1))
+
+
+async def _mt_req_with_migrate(app: Any, act: str, **kw: Any) -> dict[str, Any]:
     while True:
-        raw_phone = _ask_non_empty("Phone number: ")
+        res = await app.mt_req(act, **kw)
+        if not isinstance(res, dict):
+            return {"error": "UNEXPECTED_RESPONSE", "raw": res}
+        err = (_extract_error(res) or "")
+        dc_id = _extract_migrate_dc(err)
+        if dc_id is None:
+            return res
+        dc_map = get_dynamic_dc_config()
+        endpoint = pick_dc_endpoint(dc_map, preferred_dc=dc_id)
+        await app.mt.close()
+        app.mt.stop_ev.clear()
+        app.mt.host = endpoint.host
+        app.mt.port = endpoint.port
+        await app.mt.boot()
+        log.warning("Migrated MT auth request to dc%s %s:%s", dc_id, endpoint.host, endpoint.port)
+
+async def _mt_auth_flow(app: Any, vault: Path, api_id: int | str | None = None, api_hash: str | None = None) -> dict[str, str] | None:
+    print("GoyGram interactive login")
+    if api_id is None:
+        api_id = await _ask_non_empty("Telegram API ID: ")
+    if api_hash is None:
+        api_hash = await _ask_non_empty("Telegram API Hash: ")
+    api_id = int(str(api_id).strip())
+    api_hash = str(api_hash).strip()
+    while True:
+        raw_phone = await _ask_non_empty("Phone number: ")
         try:
             phone = _normalize_phone(raw_phone)
         except ValueError as e:
@@ -105,7 +140,7 @@ async def _mt_auth_flow(app: Any, vault: Path) -> dict[str, str] | None:
             continue
         print(f"Requesting Telegram code for {phone}...")
         try:
-            sent = await app.mt_req("auth_send_code", phone=phone)
+            sent = await _mt_req_with_migrate(app, "auth_send_code", phone=phone, api_id=api_id, api_hash=api_hash)
         except Exception as e:
             print(f"Failed to send code: {e}")
             continue
@@ -123,13 +158,16 @@ async def _mt_auth_flow(app: Any, vault: Path) -> dict[str, str] | None:
         print("Code sent. Enter the code from Telegram/SMS.")
 
         while True:
-            code = _ask_non_empty("Code: ")
+            code = await _ask_non_empty("Code: ")
             try:
-                sign = await app.mt_req(
+                sign = await _mt_req_with_migrate(
+                    app,
                     "auth_sign_in",
                     phone=phone,
                     code=code,
                     phone_code_hash=phone_code_hash,
+                    api_id=api_id,
+                    api_hash=api_hash,
                 )
             except Exception as e:
                 print(f"auth.signIn failed: {e}")
@@ -145,12 +183,12 @@ async def _mt_auth_flow(app: Any, vault: Path) -> dict[str, str] | None:
             final = sign
             if "SESSION_PASSWORD_NEEDED" in sign_err:
                 while True:
-                    pwd = getpass.getpass("2FA password: ").strip()
+                    pwd = (await asyncio.to_thread(getpass.getpass, "2FA password: ")).strip()
                     if not pwd:
                         print("Input cannot be empty")
                         continue
                     try:
-                        check = await app.mt_req("auth_check_password", password=pwd)
+                        check = await _mt_req_with_migrate(app, "auth_check_password", password=pwd, api_id=api_id, api_hash=api_hash)
                     except Exception as e:
                         print(f"auth.checkPassword failed: {e}")
                         continue
@@ -175,6 +213,8 @@ async def _mt_auth_flow(app: Any, vault: Path) -> dict[str, str] | None:
                 "user": user,
                 "auth_key": auth_blob.decode("utf-8", errors="ignore"),
                 "dc": _field(final, "dc_id", "dc"),
+                "api_id": api_id,
+                "api_hash": api_hash,
             }
             vault.write_bytes(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode())
             print("Success! Session saved to vault.bin")
@@ -182,7 +222,7 @@ async def _mt_auth_flow(app: Any, vault: Path) -> dict[str, str] | None:
             return {"source": "interactive"}
 
 
-async def bootstrap_session(app: Any | None = None) -> dict[str, str] | None:
+async def bootstrap_session(app: Any | None = None, api_id: int | str | None = None, api_hash: str | None = None) -> dict[str, str] | None:
     vault = Path("vault.bin")
     if vault.exists() and vault.stat().st_size > 0:
         log.info("Vault detected. Session bootstrap completed.")
@@ -195,4 +235,4 @@ async def bootstrap_session(app: Any | None = None) -> dict[str, str] | None:
         return {"source": "session_migrated"}
     if app is None:
         raise RuntimeError("MT app context is required for interactive authorization")
-    return await _mt_auth_flow(app, vault)
+    return await _mt_auth_flow(app, vault, api_id=api_id, api_hash=api_hash)

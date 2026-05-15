@@ -51,7 +51,7 @@ class AppCfg(BaseModel):
 
 
 class AppCore:
-    def __init__(self, cfg: AppCfg) -> None:
+    def __init__(self, cfg: AppCfg, api_id: int | str | None = None, api_hash: str | None = None) -> None:
         self.cfg = cfg
         self.bus = Bus(cfg.bus_max)
         self.bot = None
@@ -75,6 +75,8 @@ class AppCore:
         self.stop_ev = asyncio.Event()
         self.log = get_logger("goygram.app")
         self.self_id: int | None = None
+        self.api_id = api_id
+        self.api_hash = api_hash
 
     def on_msg(self, fn: Fn | None = None, filt: Filter | None = None):
         def wrap(inner: Fn) -> Fn:
@@ -460,8 +462,8 @@ class AppCore:
             tasks.append(asyncio.create_task(self.bot.spin(), name="bot"))
         if self.mt:
             self.log.info("MT transport is enabled.")
-            await bootstrap_session(self)
             tasks.append(asyncio.create_task(self.mt.spin(), name="mt"))
+            await bootstrap_session(self, api_id=self.api_id, api_hash=self.api_hash)
         try:
             await self.stop_ev.wait()
         finally:
@@ -482,6 +484,8 @@ class GoyGram:
         bot_timeout: int = 25,
         bot_base: str = "https://api.telegram.org",
         bus_max: int = 0,
+        api_id: int | str | None = None,
+        api_hash: str | None = None,
     ) -> None:
         bot = BotCfg(token=bot_token, timeout=bot_timeout, base=bot_base) if bot_token is not None else None
         log = get_logger("goygram.dc")
@@ -500,7 +504,7 @@ class GoyGram:
                 log.warning("Using fallback MT endpoint %s:%s", resolved_host, resolved_port)
 
         mt = MtCfg(host=resolved_host, port=resolved_port, key=mt_key, iv=mt_iv) if resolved_host is not None and resolved_port is not None else None
-        self.core = AppCore(AppCfg(bot=bot, mt=mt, bus_max=bus_max))
+        self.core = AppCore(AppCfg(bot=bot, mt=mt, bus_max=bus_max), api_id=api_id, api_hash=api_hash)
 
     def on_msg(self, fn: Fn | None = None, filt: Filter | None = None):
         return self.core.on_msg(fn, filt=filt)

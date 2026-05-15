@@ -8,3 +8,5 @@ from .types.poll import PollObj
 __all__ = ["GoyGram", "InlineKbd", "ReplyKbd", "Btn", "ForceReply", "ReplyGone", "LinkOpts", "PollObj", "MemberObj", "print_methods"]
 
 from . import filters
+
+__version__ = "0.4.0"

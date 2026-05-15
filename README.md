@@ -14,7 +14,7 @@ Ultimate split-brain Telegram framework (Python + Rust core) built for productio
 - **Vault AES-GCM**: encrypted local session bootstrap.
 - **TUI auth flow**: terminal-first authorization workflow.
 - **Proxy support**: route traffic through your required network topology.
-- **Dual transport**: Bot API + MTProto in one app runtime.
+- **Dual transport**: Bot API + MTProto (with API ID/API Hash) in one app runtime.
 - **Dynamic DC Routing**: MTProto nodes are fetched at startup from Telegram public config (no baked-in DC IP list).
 
 ## Installation
@@ -38,16 +38,16 @@ async def echo(msg):
 asyncio.run(app.run())
 ```
 
-### 2) MTProto (no bot token)
+### 2) MTProto (no bot token, requires API ID + API Hash)
 ```python
 import asyncio
 from goygram import GoyGram
 
-app = GoyGram()  # auto-fetches Telegram DC endpoint at startup
+app = GoyGram(api_id=123456, api_hash="0123456789abcdef0123456789abcdef")  # auto-fetches Telegram DC endpoint at startup
 
 @app.on_cmd("ping")
 async def ping(msg):
-    await msg.reply("pong from MTProto")
+    await msg.reply("pong from MTProto (api_id/api_hash)")
 
 asyncio.run(app.run())
 ```
@@ -61,7 +61,7 @@ GoyGram now supports **all Telegram methods out of the box** with dynamic dispat
   - `await app.getUpdates(timeout=30)`
 - Snake-case also works and is converted to Bot API method names:
   - `await app.send_document(chat_id=..., document=...)` -> `sendDocument`
-- MTProto actions are available with `mt_` prefix:
+- MTProto actions (authorized with API ID/API Hash) are available with `mt_` prefix:
   - `await app.mt_get_dialogs(limit=50)`
   - `await app.mt_get_chat_full(chat_id=...)`
 
