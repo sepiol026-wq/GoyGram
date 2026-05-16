@@ -1,7 +1,7 @@
 # CopyLeft 2026 github.com/sepiol026-wq | telegram:@samsepi0l_ovf. Licensed under AGPLv3.
 [package]
 name = "goygram_ext"
-version = "0.4.8"
+version = "0.4.9"
 edition = "2021"
 
 [lib]
