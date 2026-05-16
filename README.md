@@ -22,8 +22,6 @@ Ultimate split-brain Telegram framework (Python + Rust core) built for productio
 ```bash
 pip install goygram
 ```
-> 📚 **Looking for guides, API references, or multi-session farming?** > 
-> 👉 **[Check out the Official GoyGram Wiki!](https://github.com/sepiol026-wq/GoyGram/wiki)**
 
 ## Quick Start
 
@@ -119,6 +117,10 @@ another = filters.text | filters.me
 async def handler(msg):
     await msg.reply("Filtered")
 ```
+
+> 📚 **Looking for guides, API references, or multi-session farming?** > 
+> 👉 **[Check out the Official GoyGram Wiki!](https://github.com/sepiol026-wq/GoyGram/wiki)**
+
 
 ## License
 See [LICENSE](./LICENSE).
