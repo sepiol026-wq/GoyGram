@@ -329,19 +329,37 @@ class MTNet:
         r = Reader(dec)
         _salt = r.take(8); _sid = r.take(8); _msg_id = r.i64(); _seq = r.i32(); ln = r.i32()
         msg = r.take(ln)
-        if len(msg) < 12:
-            return
-        rm = Reader(msg)
-        cid = rm.u32()
-        if cid != 0xf35c6d01:
-            return
-        req_msg_id = rm.i64()
-        result = msg[12:]
-        fut = self.pending.pop(req_msg_id, None)
-        if not fut or fut.done():
-            return
-        parsed = self._parse_rpc_result(result)
-        fut.set_result(parsed)
+
+        def _consume(inner: bytes) -> None:
+            if len(inner) < 4:
+                return
+            rm = Reader(inner)
+            cid = rm.u32()
+            if cid == 0xf35c6d01:  # rpc_result
+                if len(inner) < 12:
+                    return
+                req_msg_id = rm.i64()
+                result = inner[12:]
+                fut = self.pending.pop(req_msg_id, None)
+                if not fut or fut.done():
+                    return
+                fut.set_result(self._parse_rpc_result(result))
+                return
+            if cid == 0x73f1f8dc:  # msg_container
+                try:
+                    cnt = rm.i32()
+                except Exception:
+                    return
+                for _ in range(max(cnt, 0)):
+                    try:
+                        _m_id = rm.i64(); _seqno = rm.i32(); mlen = rm.i32()
+                        chunk = rm.take(mlen)
+                    except Exception:
+                        return
+                    _consume(chunk)
+                return
+
+        _consume(msg)
 
     def _parse_auth_result(self, result:bytes)->dict[str,Any]|None:
         if len(result) < 8:
