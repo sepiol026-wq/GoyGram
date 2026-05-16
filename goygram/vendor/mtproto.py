@@ -424,10 +424,11 @@ class MTNet:
             body=self.codec.auth_sign_in(
                 str(obj.get('phone_number') or obj.get('phone')),
                 str(obj.get('phone_code_hash')),
-                str(obj.get('phone_code') or obj.get('code'))
+                str(obj.get('phone_code') or obj.get('code')),
+                int(obj['api_id'])
             )
         elif act in {'auth.checkPassword', 'auth_check_password'}:
-            body=self.codec.auth_check_password(str(obj.get('password') or ''))
+            body=self.codec.auth_check_password(str(obj.get('password') or ''), int(obj['api_id']))
         elif act == 'send_msg':
             raise RuntimeError('send_msg is not available in low-level MT auth transport')
         elif act == 'del_msg':

@@ -59,13 +59,13 @@ class MTCodec:
 
 
 
-    def auth_check_password(self, password:str)->bytes:
+    def auth_check_password(self, password:str, api_id:int)->bytes:
         req=u32(self.AUTH_CHECK_PASSWORD)+tl_str(password)
-        init=u32(self.INIT_CONNECTION)+i32(0)+tl_str('goygram')+tl_str('0.4.1')+tl_str('linux')+tl_str('en')+tl_str('en')+req
+        init=u32(self.INIT_CONNECTION)+i32(api_id)+tl_str('goygram')+tl_str('0.4.1')+tl_str('linux')+tl_str('en')+tl_str('')+tl_str('en')+req
         return u32(self.INVOKE_WITH_LAYER)+i32(self.LAYER)+init
-    def auth_sign_in(self, phone:str, phone_code_hash:str, code:str)->bytes:
+    def auth_sign_in(self, phone:str, phone_code_hash:str, code:str, api_id:int)->bytes:
         req=u32(self.AUTH_SIGN_IN)+tl_str(phone)+tl_str(phone_code_hash)+tl_str(code)
-        init=u32(self.INIT_CONNECTION)+i32(0)+tl_str('goygram')+tl_str('0.4.1')+tl_str('linux')+tl_str('en')+tl_str('en')+req
+        init=u32(self.INIT_CONNECTION)+i32(api_id)+tl_str('goygram')+tl_str('0.4.1')+tl_str('linux')+tl_str('en')+tl_str('')+tl_str('en')+req
         return u32(self.INVOKE_WITH_LAYER)+i32(self.LAYER)+init
     INIT_CONNECTION=0xc1cd5ea9
     INVOKE_WITH_LAYER=0xda9b0d0d
@@ -89,7 +89,7 @@ class MTCodec:
 
     def auth_send_code(self, phone:str, api_id:int, api_hash:str)->bytes:
         req=u32(self.AUTH_SEND_CODE)+tl_str(phone)+i32(api_id)+tl_str(api_hash)+u32(self.CODE_SETTINGS)+i32(0)
-        init=u32(self.INIT_CONNECTION)+i32(0)+tl_str('goygram')+tl_str('0.4.1')+tl_str('linux')+tl_str('en')+tl_str('en')+req
+        init=u32(self.INIT_CONNECTION)+i32(api_id)+tl_str('goygram')+tl_str('0.4.1')+tl_str('linux')+tl_str('en')+tl_str('')+tl_str('en')+req
         return u32(self.INVOKE_WITH_LAYER)+i32(self.LAYER)+init
 
 
