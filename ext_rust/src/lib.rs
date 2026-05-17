@@ -51,16 +51,16 @@ fn enc_raw(key: &[u8], iv: &[u8], data: &[u8]) -> PyResult<Vec<u8>> {
     for blk in data.chunks_exact(16) {
         let mut tmp = [0u8; 16];
         for i in 0..16 {
-            tmp[i] = blk[i] ^ y[i];
+            tmp[i] = blk[i] ^ x[i];
         }
         let mut ga = GenericArray::clone_from_slice(&tmp);
         aes.encrypt_block(&mut ga);
         let mut c = [0u8; 16];
         for i in 0..16 {
-            c[i] = ga[i] ^ x[i];
+            c[i] = ga[i] ^ y[i];
         }
-        x.copy_from_slice(blk);
-        y.copy_from_slice(&c);
+        x.copy_from_slice(&c);
+        y.copy_from_slice(blk);
         out.extend_from_slice(&c);
     }
     Ok(out)
@@ -75,16 +75,16 @@ fn dec_raw(key: &[u8], iv: &[u8], data: &[u8]) -> PyResult<Vec<u8>> {
     for blk in data.chunks_exact(16) {
         let mut tmp = [0u8; 16];
         for i in 0..16 {
-            tmp[i] = blk[i] ^ x[i];
+            tmp[i] = blk[i] ^ y[i];
         }
         let mut ga = GenericArray::clone_from_slice(&tmp);
         aes.decrypt_block(&mut ga);
         let mut p = [0u8; 16];
         for i in 0..16 {
-            p[i] = ga[i] ^ y[i];
+            p[i] = ga[i] ^ x[i];
         }
-        x.copy_from_slice(&p);
-        y.copy_from_slice(blk);
+        x.copy_from_slice(blk);
+        y.copy_from_slice(&p);
         out.extend_from_slice(&p);
     }
     Ok(out)
@@ -139,7 +139,7 @@ fn pack(data: &[u8]) -> Vec<u8> {
 }
 
 #[pymodule]
-fn _ext(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
+fn ext(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(aes_ige_enc, m)?)?;
     m.add_function(wrap_pyfunction!(aes_ige_dec, m)?)?;
     m.add_function(wrap_pyfunction!(aes_ige_enc_raw, m)?)?;
@@ -148,4 +148,3 @@ fn _ext(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pack, m)?)?;
     Ok(())
 }
-

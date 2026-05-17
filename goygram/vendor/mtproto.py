@@ -1,14 +1,14 @@
 # CopyLeft 2026 github.com/sepiol026-wq | telegram:@samsepi0l_ovf. Licensed under AGPLv3.
 # Contains elements of Aiogram (MIT) / Pyrogram (LGPL-3.0)
 from __future__ import annotations
-import asyncio, os, secrets, struct, urllib.parse
+import asyncio, hashlib, os, secrets, struct, urllib.parse
 from hashlib import sha1, sha256
 from typing import Any
 
 from .tl_core import IntermediateTransport, MTCodec, MTMessage, MsgIdGen, Reader, factorize, kdf, kdf_msg, rsa_pad_encrypt
 
 try:
-    from goygram.ext import _ext as rx
+    from goygram import ext as rx
 except Exception:
     rx = None
 
@@ -22,6 +22,63 @@ TELEGRAM_RSA_KEYS: dict[int, int] = {
     -5738946642031285640: int("22347337644621997830323797217583448833849627595286505527328214795712874535417149457567295215523199212899872122674023936713124024124676488204889357563104452250187725437815819680799441376434162907889288526863223004380906766451781702435861040049293189979755757428366240570457372226323943522935844086838355728767565415115131238950994049041950699006558441163206523696546297006014416576123345545601004508537089192869558480948139679182328810531942418921113328804749485349441503927570568778905918696883174575510385552845625481490900659718413892216221539684717773483326240872061786759868040623935592404144262688161923519030977"),
     8205599988028290019: int("24573455207957565047870011785254215390918912369814947541785386299516827003508659346069416840622922416779652050319196701077275060353178142796963682024347858398319926119639265555410256455471016400261630917813337515247954638555325280392998950756512879748873422896798579889820248358636937659872379948616822902110696986481638776226860777480684653756042166610633513404129518040549077551227082262066602286208338952016035637334787564972991208252928951876463555456715923743181359826124083963758009484867346318483872552977652588089928761806897223231500970500186019991032176060579816348322451864584743414550721639495547636008351"),
 }
+
+
+def _btoi(b:bytes)->int:
+    return int.from_bytes(b, "big")
+
+
+def _itob(i:int)->bytes:
+    return i.to_bytes(256, "big")
+
+
+def _xor(a:bytes, b:bytes)->bytes:
+    return bytes(i ^ j for i, j in zip(a, b))
+
+
+def _compute_password_hash(algo:dict[str,Any], password:str)->bytes:
+    salt1 = bytes(algo["salt1"])
+    salt2 = bytes(algo["salt2"])
+    hash1 = sha256(salt1 + password.encode() + salt1).digest()
+    hash2 = sha256(salt2 + hash1 + salt2).digest()
+    hash3 = hashlib.pbkdf2_hmac("sha512", hash2, salt1, 100000)
+    return sha256(salt2 + hash3 + salt2).digest()
+
+
+def _compute_password_check(state:dict[str,Any], password:str)->tuple[int,bytes,bytes]:
+    algo = dict(state["current_algo"])
+    p_bytes = bytes(algo["p"])
+    p = _btoi(p_bytes)
+    g = int(algo["g"])
+    g_bytes = _itob(g)
+    b_bytes = bytes(state["srp_B"])
+    b = _btoi(b_bytes)
+    srp_id = int(state["srp_id"])
+    x_bytes = _compute_password_hash(algo, password)
+    x = _btoi(x_bytes)
+    g_x = pow(g, x, p)
+    k = _btoi(sha256(p_bytes + g_bytes).digest())
+    kg_x = (k * g_x) % p
+    while True:
+        a_bytes = secrets.token_bytes(256)
+        a = _btoi(a_bytes)
+        a_pub = pow(g, a, p)
+        a_pub_bytes = _itob(a_pub)
+        u = _btoi(sha256(a_pub_bytes + b_bytes).digest())
+        if u > 0:
+            break
+    g_b = (b - kg_x) % p
+    s = pow(g_b, a + (u * x), p)
+    k_bytes = sha256(_itob(s)).digest()
+    m1_bytes = sha256(
+        _xor(sha256(p_bytes).digest(), sha256(g_bytes).digest())
+        + sha256(bytes(algo["salt1"])).digest()
+        + sha256(bytes(algo["salt2"])).digest()
+        + a_pub_bytes
+        + b_bytes
+        + k_bytes
+    ).digest()
+    return srp_id, a_pub_bytes, m1_bytes
 
 
 def _tl_bytes_at(b:bytes, p:int)->tuple[bytes,int]:
@@ -89,34 +146,86 @@ def _skip_tl_object(b:bytes, p:int)->int:
 
 
 def _parse_user_obj(b:bytes)->dict[str,Any]|None:
-    if len(b) < 12:
-        return None
-    cid = int.from_bytes(b[:4], "little")
-    if cid != 0x20b1422:
-        return None
-    p = 4
-    flags = int.from_bytes(b[p:p+4], "little", signed=True); p += 4
-    user_id = int.from_bytes(b[p:p+8], "little", signed=True); p += 8
-    if flags & (1 << 0):
-        _, p = _tl_bytes_at(b, p)
-    if flags & (1 << 1):
-        _, p = _tl_bytes_at(b, p)
-    if flags & (1 << 2):
-        _, p = _tl_bytes_at(b, p)
-    username = None
-    if flags & (1 << 3):
-        u, p = _tl_bytes_at(b, p)
-        username = u.decode("utf-8", errors="ignore")
-    phone = None
-    if flags & (1 << 4):
-        ph, p = _tl_bytes_at(b, p)
-        phone = ph.decode("utf-8", errors="ignore")
-    out = {"id": user_id}
-    if username:
-        out["username"] = username
-    if phone:
-        out["phone"] = phone
-    return out
+    try:
+        if len(b) < 12:
+            return None
+        cid = int.from_bytes(b[:4], "little")
+        if cid == 0x020b1422:
+            p = 4
+            flags = int.from_bytes(b[p:p+4], "little", signed=True); p += 4
+            user_id = int.from_bytes(b[p:p+8], "little", signed=True); p += 8
+            if flags & (1 << 0):
+                access_hash = int.from_bytes(b[p:p+8], "little", signed=True); p += 8
+            else:
+                access_hash = None
+            first_name = None
+            if flags & (1 << 1):
+                raw, p = _tl_bytes_at(b, p)
+                first_name = raw.decode("utf-8", errors="ignore")
+            last_name = None
+            if flags & (1 << 2):
+                raw, p = _tl_bytes_at(b, p)
+                last_name = raw.decode("utf-8", errors="ignore")
+            username = None
+            if flags & (1 << 3):
+                raw, p = _tl_bytes_at(b, p)
+                username = raw.decode("utf-8", errors="ignore")
+            phone = None
+            if flags & (1 << 4):
+                raw, p = _tl_bytes_at(b, p)
+                phone = raw.decode("utf-8", errors="ignore")
+            out = {"id": user_id}
+            if access_hash is not None:
+                out["access_hash"] = access_hash
+            if first_name:
+                out["first_name"] = first_name
+            if last_name:
+                out["last_name"] = last_name
+            if username:
+                out["username"] = username
+            if phone:
+                out["phone"] = phone
+            return out
+        if cid != 0x8f97c628 or len(b) < 20:
+            return {"id": 0, "first_name": "Unknown (Unsupported User Constructor)"}
+        p = 4
+        flags = int.from_bytes(b[p:p+4], "little", signed=True); p += 4
+        _flags2 = int.from_bytes(b[p:p+4], "little", signed=True); p += 4
+        user_id = int.from_bytes(b[p:p+8], "little", signed=True); p += 8
+        if flags & (1 << 0):
+            access_hash = int.from_bytes(b[p:p+8], "little", signed=True); p += 8
+        else:
+            access_hash = None
+        first_name = None
+        if flags & (1 << 1):
+            raw, p = _tl_bytes_at(b, p)
+            first_name = raw.decode("utf-8", errors="ignore")
+        last_name = None
+        if flags & (1 << 2):
+            raw, p = _tl_bytes_at(b, p)
+            last_name = raw.decode("utf-8", errors="ignore")
+        username = None
+        if flags & (1 << 3):
+            raw, p = _tl_bytes_at(b, p)
+            username = raw.decode("utf-8", errors="ignore")
+        phone = None
+        if flags & (1 << 4):
+            raw, p = _tl_bytes_at(b, p)
+            phone = raw.decode("utf-8", errors="ignore")
+        out = {"id": user_id}
+        if access_hash is not None:
+            out["access_hash"] = access_hash
+        if first_name:
+            out["first_name"] = first_name
+        if last_name:
+            out["last_name"] = last_name
+        if username:
+            out["username"] = username
+        if phone:
+            out["phone"] = phone
+        return out
+    except Exception:
+        return {"id": 0, "first_name": "Parse Error"}
 
 class ProxyCfg:
     def __init__(self, scheme:str, host:str, port:int, user:str|None=None, pwd:str|None=None)->None:
@@ -129,6 +238,7 @@ class MTNet:
         self.pending:dict[int,asyncio.Future[dict[str,Any]]]={}
         self.transport=IntermediateTransport(); self.codec=MTCodec(); self.msg_ids=MsgIdGen(); self.wrote_tag=False
         self.auth_key:bytes|None=None; self.server_salt:bytes=b'\x00'*8; self.session_id=secrets.token_bytes(8)
+        self.auth_ready=asyncio.Event()
 
     def pick(self,obj:dict[str,Any],*keys:str)->Any:
         for k in keys:
@@ -138,22 +248,70 @@ class MTNet:
     def pack(self, raw:bytes)->bytes: return self.transport.pack(raw)
 
     def proxy_cfg(self)->ProxyCfg|None:
-        raw = os.getenv("ALL_PROXY") or os.getenv("all_proxy")
+        raw = (
+            os.getenv("ALL_PROXY") or os.getenv("all_proxy")
+            or os.getenv("HTTPS_PROXY") or os.getenv("https_proxy")
+            or os.getenv("HTTP_PROXY") or os.getenv("http_proxy")
+        )
         if not raw:
             return None
         p = urllib.parse.urlparse(raw)
-        if p.scheme.lower() not in {"socks5", "socks5h"}:
+        scheme = p.scheme.lower()
+        if scheme not in {"socks5", "socks5h", "http"}:
             return None
         if not p.hostname or not p.port:
             return None
         user = urllib.parse.unquote(p.username) if p.username else None
         pwd = urllib.parse.unquote(p.password) if p.password else None
-        return ProxyCfg(p.scheme.lower(), p.hostname, p.port, user, pwd)
+        return ProxyCfg(scheme, p.hostname, p.port, user, pwd)
 
     async def open_via_proxy(self, px:ProxyCfg)->tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         rd, wr = await asyncio.open_connection(px.host, px.port)
-        await self.socks5_handshake(rd, wr, px, self.host, self.port)
+        if px.scheme in {"socks5", "socks5h"}:
+            await self.socks5_handshake(rd, wr, px, self.host, self.port)
+        elif px.scheme == "http":
+            await self.http_connect_handshake(rd, wr, px, self.host, self.port)
+        else:
+            raise ConnectionError(f"Unsupported proxy scheme: {px.scheme}")
         return rd, wr
+
+    async def _read_http_headers(self, rd:asyncio.StreamReader, limit:int=65536)->bytes:
+        data = bytearray()
+        while b"\r\n\r\n" not in data:
+            chunk = await rd.read(4096)
+            if not chunk:
+                break
+            data.extend(chunk)
+            if len(data) > limit:
+                raise ConnectionError("HTTP proxy response headers are too large")
+        return bytes(data)
+
+    async def http_connect_handshake(self, rd:asyncio.StreamReader, wr:asyncio.StreamWriter, px:ProxyCfg, dst_host:str, dst_port:int)->None:
+        auth = ""
+        if px.user is not None or px.pwd is not None:
+            import base64
+            token = f"{px.user or ''}:{px.pwd or ''}".encode("utf-8")
+            auth = f"Proxy-Authorization: Basic {base64.b64encode(token).decode('ascii')}\r\n"
+        req = (
+            f"CONNECT {dst_host}:{dst_port} HTTP/1.1\r\n"
+            f"Host: {dst_host}:{dst_port}\r\n"
+            f"{auth}"
+            "Proxy-Connection: Keep-Alive\r\n\r\n"
+        ).encode("ascii", errors="ignore")
+        wr.write(req); await wr.drain()
+        resp = await self._read_http_headers(rd)
+        if not resp:
+            raise ConnectionError("HTTP proxy closed connection during CONNECT")
+        head = resp.split(b"\r\n", 1)[0].decode("iso-8859-1", errors="ignore")
+        parts = head.split(" ", 2)
+        if len(parts) < 2:
+            raise ConnectionError(f"Malformed HTTP proxy response: {head}")
+        try:
+            status = int(parts[1])
+        except Exception:
+            raise ConnectionError(f"Malformed HTTP proxy status line: {head}")
+        if status != 200:
+            raise ConnectionError(f"HTTP proxy CONNECT failed with status {status}: {head}")
 
     async def socks5_handshake(self, rd:asyncio.StreamReader, wr:asyncio.StreamWriter, px:ProxyCfg, dst_host:str, dst_port:int)->None:
         methods = [0]
@@ -240,7 +398,9 @@ class MTNet:
         r=Reader(pkt); _=r.i64(); _=r.i64(); ln=r.i32(); return r.take(ln)
 
     async def ensure_auth_key(self)->None:
-        if self.auth_key is not None: return
+        if self.auth_key is not None:
+            self.auth_ready.set()
+            return
         nonce=secrets.token_bytes(16)
         res=self._read_unencrypted_body(await self.invoke_unencrypted(self.codec.req_pq_multi(nonce)))
         rr=Reader(res); cid=rr.u32()
@@ -254,7 +414,7 @@ class MTNet:
         e=65537
         p,q=sorted(factorize(int.from_bytes(pq,'big')))
         new_nonce=secrets.token_bytes(32)
-        inner=self.codec.p_q_inner_data_dc(pq=pq,p=p.to_bytes(4,'big'),q=q.to_bytes(4,'big'),nonce=nonce,server_nonce=server_nonce,new_nonce=new_nonce,dc=2)
+        inner=self.codec.p_q_inner_data(pq=pq,p=p.to_bytes(4,'big'),q=q.to_bytes(4,'big'),nonce=nonce,server_nonce=server_nonce,new_nonce=new_nonce)
         enc=rsa_pad_encrypt(inner,n_mod,e)
         dh=self._read_unencrypted_body(await self.invoke_unencrypted(self.codec.req_dh_params(nonce=nonce,server_nonce=server_nonce,p=p.to_bytes(4,'big'),q=q.to_bytes(4,'big'),fp=fp,encrypted_data=enc)))
         rd=Reader(dh); dcid=rd.u32()
@@ -265,7 +425,8 @@ class MTNet:
         dec=bytes(rx.aes_ige_dec_raw(encrypted_answer,tmp_key,tmp_iv))
         answer=dec[20:]
         ra=Reader(answer); aid=ra.u32()
-        if aid!=0xb5890dba: raise RuntimeError('unexpected server_DH_inner_data')
+        print(f'[DH] server_DH_inner_data cid={aid:#010x} (expected 0xb5890dba), dec_first32={dec[:32].hex()}')
+        if aid!=0xb5890dba: raise RuntimeError(f'unexpected server_DH_inner_data cid={aid:#010x}')
         _=ra.take(16); _=ra.take(16); g=ra.i32(); dh_prime=int.from_bytes(ra.tl_bytes(),'big'); g_a=int.from_bytes(ra.tl_bytes(),'big'); _=ra.i32(); _=ra.i32()
         b=int.from_bytes(secrets.token_bytes(256),'big'); g_b=pow(g,b,dh_prime).to_bytes(256,'big')
         cli=self.codec.client_dh_inner(nonce=nonce,server_nonce=server_nonce,retry_id=0,g_b=g_b)
@@ -276,44 +437,36 @@ class MTNet:
         if c!=0x3bcbf734: raise RuntimeError(f'dh_gen not ok: {c:x}')
         self.auth_key=pow(g_a,b,dh_prime).to_bytes(256,'big')
         self.server_salt=bytes(a^b for a,b in zip(new_nonce[:8],server_nonce[:8]))
+        self.auth_ready.set()
 
     def _parse_phone_code_hash(self, result:bytes)->str|None:
         try:
             r = Reader(result)
-            _cid = r.u32()
+            cid = r.u32()
+            if cid != 0x5e002502:
+                return None
             _flags = r.i32()
             st = r.u32()
-            if st in {0x9fd736, 0x3dbb5986, 0xc000bba2, 0x5353e5a7, 0xab03c6d9}:
-                if st in {0x3dbb5986, 0xc000bba2, 0x9fd736, 0xab03c6d9}:
+            if st in {0x3dbb5986, 0xc000bba2, 0x5353e5a7, 0xab03c6d9, 0xe57b1432, 0x82006484, 0xa5491dea, 0xd9565c39}:
+                if st in {0x3dbb5986, 0xc000bba2, 0xab03c6d9}:
                     _ = r.i32()
                 elif st == 0x5353e5a7:
                     _ = r.tl_bytes()
+                elif st == 0xe57b1432:
+                    _, _ = r.tl_bytes(), r.tl_bytes()
+                    _ = r.i32()
+                elif st == 0x82006484:
+                    _ = r.tl_bytes()
+                    _ = r.i32()
+                elif st == 0xa5491dea:
+                    _, _ = r.i32(), r.i32()
+                elif st == 0xd9565c39:
+                    _ = r.i32()
             v = r.tl_bytes().decode("utf-8", errors="ignore")
             if v:
                 return v
         except Exception:
             pass
-        i = 0
-        while i < len(result):
-            n0 = result[i]
-            if n0 == 254:
-                if i + 4 > len(result):
-                    break
-                ln = int.from_bytes(result[i + 1:i + 4], "little")
-                head = 4
-            else:
-                ln = n0
-                head = 1
-            j = i + head
-            if 0 < ln <= 256 and j + ln <= len(result):
-                raw = result[j:j + ln]
-                try:
-                    s = raw.decode("utf-8")
-                    if 6 <= len(s) <= 256 and all(ch.isalnum() or ch in "_-=" for ch in s):
-                        return s
-                except Exception:
-                    pass
-            i += 1
         return None
 
     def _handle_encrypted_packet(self, pkt:bytes)->None:
@@ -335,17 +488,24 @@ class MTNet:
                 return
             rm = Reader(inner)
             cid = rm.u32()
-            if cid == 0xf35c6d01:  # rpc_result
+            if cid == 0xf35c6d01:
                 if len(inner) < 12:
                     return
                 req_msg_id = rm.i64()
                 result = inner[12:]
+                print(f"[RPC-DBG] rpc_result req_msg_id={req_msg_id} pending_keys={list(self.pending.keys())}")
                 fut = self.pending.pop(req_msg_id, None)
                 if not fut or fut.done():
+                    print(f"[RPC-DBG] NO MATCH or done! fut={fut}")
                     return
-                fut.set_result(self._parse_rpc_result(result))
+                try:
+                    parsed = self._parse_rpc_result(result)
+                except Exception as exc:
+                    import traceback; traceback.print_exc()
+                    parsed = {"ok": True, "raw_result_hex": result.hex(), "_parse_error": str(exc)}
+                fut.set_result(parsed)
                 return
-            if cid == 0x73f1f8dc:  # msg_container
+            if cid == 0x73f1f8dc:
                 try:
                     cnt = rm.i32()
                 except Exception:
@@ -365,36 +525,89 @@ class MTNet:
         if len(result) < 8:
             return None
         cid = int.from_bytes(result[:4], "little")
-        if cid not in {0xb5757299, 0x44747e9a}:
+        if cid == 0x44747e9a:
+            return {"ok": True, "auth_key": self.auth_key or b""}
+        if cid == 0xb5757299:
+            p = 4
+            flags = int.from_bytes(result[p:p+4], "little", signed=True); p += 4
+            p += 8
+            _, p = _tl_bytes_at(result, p)
+            _, p = _tl_bytes_at(result, p)
+            if flags & (1 << 1):
+                _, p = _tl_bytes_at(result, p)
+            if flags & (1 << 4):
+                _, p = _tl_bytes_at(result, p)
+            _, p = _tl_bytes_at(result, p)
+            if flags & (1 << 0):
+                p += 4
+            _, p = _tl_bytes_at(result, p)
+            _, p = _tl_bytes_at(result, p)
+            _, p = _tl_bytes_at(result, p)
+            p += 4
+            if flags & (1 << 2):
+                p += 4
+            if flags & (1 << 3):
+                p += 4
+            if flags & (1 << 5):
+                p += 4
+            if flags & (1 << 6):
+                p += 4
+            user = _parse_user_obj(result[p:])
+            out = {"ok": True, "auth_key": self.auth_key or b""}
+            if user is not None:
+                out["user"] = user
+            return out
+        if cid != 0x2ea2c0d4:
             return None
         p = 4
         flags = int.from_bytes(result[p:p+4], "little", signed=True); p += 4
-        p += 8
-        _, p = _tl_bytes_at(result, p)
-        _, p = _tl_bytes_at(result, p)
         if flags & (1 << 1):
-            _, p = _tl_bytes_at(result, p)
-        if flags & (1 << 4):
-            _, p = _tl_bytes_at(result, p)
-        _, p = _tl_bytes_at(result, p)
+            p += 4
         if flags & (1 << 0):
             p += 4
-        _, p = _tl_bytes_at(result, p)
-        _, p = _tl_bytes_at(result, p)
-        _, p = _tl_bytes_at(result, p)
-        p += 4
         if flags & (1 << 2):
-            p += 4
-        if flags & (1 << 3):
-            p += 4
-        if flags & (1 << 5):
-            p += 4
-        if flags & (1 << 6):
-            p += 4
+            _, p = _tl_bytes_at(result, p)
         user = _parse_user_obj(result[p:])
         out = {"ok": True, "auth_key": self.auth_key or b""}
         if user is not None:
             out["user"] = user
+        return out
+
+    def _parse_account_password(self, result:bytes)->dict[str,Any]|None:
+        if len(result) < 8:
+            return None
+        if int.from_bytes(result[:4], "little") != 0x957b50fb:
+            return None
+        p = 4
+        flags = int.from_bytes(result[p:p+4], "little", signed=True); p += 4
+        out:dict[str,Any] = {
+            "ok": True,
+            "has_recovery": bool(flags & (1 << 0)),
+            "has_secure_values": bool(flags & (1 << 1)),
+            "has_password": bool(flags & (1 << 2)),
+        }
+        if flags & (1 << 2):
+            if p + 4 > len(result):
+                return None
+            algo_cid = int.from_bytes(result[p:p+4], "little"); p += 4
+            if algo_cid != 0x3a912d4a:
+                return {
+                    "ok": False,
+                    "error": f"UNSUPPORTED_PASSWORD_ALGO_{algo_cid:x}",
+                    "error_message": f"UNSUPPORTED_PASSWORD_ALGO_{algo_cid:x}",
+                }
+            salt1, p = _tl_bytes_at(result, p)
+            salt2, p = _tl_bytes_at(result, p)
+            g = int.from_bytes(result[p:p+4], "little", signed=True); p += 4
+            prime, p = _tl_bytes_at(result, p)
+            srp_b, p = _tl_bytes_at(result, p)
+            srp_id = int.from_bytes(result[p:p+8], "little", signed=True); p += 8
+            out["current_algo"] = {"salt1": salt1, "salt2": salt2, "g": g, "p": prime}
+            out["srp_B"] = srp_b
+            out["srp_id"] = srp_id
+        if flags & (1 << 3):
+            hint, p = _tl_bytes_at(result, p)
+            out["hint"] = hint.decode("utf-8", errors="ignore")
         return out
 
     def _parse_rpc_result(self, result:bytes)->dict[str,Any]:
@@ -406,12 +619,25 @@ class MTNet:
                 ec = r.i32()
                 em = r.tl_bytes().decode("utf-8", errors="ignore")
                 return {"ok": False, "error_code": ec, "error": em, "error_message": em}
-        phone_code_hash = self._parse_phone_code_hash(result)
-        if phone_code_hash:
-            return {"ok": True, "phone_code_hash": phone_code_hash}
+            if cid == 0x3072cfa1:
+                import gzip as _gz
+                try:
+                    packed = Reader(result)
+                    packed.u32()
+                    compressed = packed.tl_bytes()
+                    result = _gz.decompress(compressed)
+                except Exception:
+                    pass
+        print(f"[PARSE-DBG] result cid={int.from_bytes(result[:4], 'little'):#010x} len={len(result)}")
         auth = self._parse_auth_result(result)
         if auth is not None:
             return auth
+        pwd = self._parse_account_password(result)
+        if pwd is not None:
+            return pwd
+        phone_code_hash = self._parse_phone_code_hash(result)
+        if phone_code_hash:
+            return {"ok": True, "phone_code_hash": phone_code_hash}
         return {"ok": True, "raw_result_hex": result.hex()}
 
     async def send(self, obj:dict[str,Any], req_msg_id:int|None=None)->int:
@@ -427,8 +653,15 @@ class MTNet:
                 str(obj.get('phone_code') or obj.get('code')),
                 int(obj['api_id'])
             )
-        elif act in {'auth.checkPassword', 'auth_check_password'}:
-            body=self.codec.auth_check_password(str(obj.get('password') or ''), int(obj['api_id']))
+        elif act in {'account.getPassword', 'account_get_password'}:
+            body=self.codec.account_get_password(int(obj['api_id']))
+        elif act in {'auth.checkPasswordSrp', 'auth_check_password_srp'}:
+            body=self.codec.auth_check_password(
+                srp_id=int(obj['srp_id']),
+                A=bytes(obj['A']),
+                M1=bytes(obj['M1']),
+                api_id=int(obj['api_id'])
+            )
         elif act == 'send_msg':
             raise RuntimeError('send_msg is not available in low-level MT auth transport')
         elif act == 'del_msg':
@@ -462,7 +695,7 @@ class MTNet:
     async def del_msg(self, chat_id:int|str, msg_id:int)->dict[str,Any]:
         return await self.call('del_msg', chat_id=chat_id, msg_id=msg_id)
 
-    async def call(self, act:str, **kw:Any)->dict[str,Any]:
+    async def _rpc_call(self, act:str, **kw:Any)->dict[str,Any]:
         loop = asyncio.get_running_loop()
         fut:asyncio.Future[dict[str,Any]] = loop.create_future()
         req_msg_id = self.msg_ids.next()
@@ -475,7 +708,42 @@ class MTNet:
             self.pending.pop(req_msg_id, None)
             raise TimeoutError(f'no response for act={act} msg_id={req_msg_id}')
 
+    async def _auth_check_password_flow(self, password:str, api_id:int)->dict[str,Any]:
+        state = await self._rpc_call('account_get_password', api_id=api_id)
+        print(f"[2FA-DBG] state type={type(state).__name__} keys={list(state.keys()) if isinstance(state, dict) else 'N/A'}")
+        if not isinstance(state, dict):
+            print("[2FA-DBG] FAIL: state is not dict")
+            return {"ok": False, "error": "UNEXPECTED_PASSWORD_STATE", "raw": state}
+        if not state.get("ok", True):
+            print(f"[2FA-DBG] FAIL: state ok={state.get('ok')}")
+            return state
+        if not state.get("has_password"):
+            print(f"[2FA-DBG] FAIL: has_password={state.get('has_password')}")
+            return {"ok": False, "error": "PASSWORD_NOT_ENABLED", "error_message": "PASSWORD_NOT_ENABLED"}
+        algo = state.get("current_algo")
+        srp_b = state.get("srp_B")
+        srp_id = state.get("srp_id")
+        print(f"[2FA-DBG] algo type={type(algo).__name__} srp_b type={type(srp_b).__name__ if srp_b is not None else 'None'} len={len(srp_b) if isinstance(srp_b,(bytes,bytearray)) else 'N/A'} srp_id={srp_id}")
+        if not isinstance(algo, dict) or not isinstance(srp_b, (bytes, bytearray)) or srp_id is None:
+            print(f"[2FA-DBG] FAIL: invalid state types")
+            return {"ok": False, "error": "INVALID_PASSWORD_STATE", "error_message": "INVALID_PASSWORD_STATE"}
+        print(f"[2FA-DBG] algo keys={list(algo.keys())} salt1 len={len(algo.get('salt1',b''))} salt2 len={len(algo.get('salt2',b''))} g={algo.get('g')} p len={len(algo.get('p',b''))}")
+        try:
+            srp_id, a_pub, m1 = _compute_password_check(state, password)
+            print(f"[2FA-DBG] SRP computed: srp_id={srp_id} A len={len(a_pub)} M1 len={len(m1)}")
+        except Exception as exc:
+            import traceback; traceback.print_exc()
+            print(f"[2FA-DBG] FAIL: SRP exception: {exc}")
+            return {"ok": False, "error": "PASSWORD_SRP_BUILD_FAILED", "error_message": str(exc)}
+        return await self._rpc_call('auth_check_password_srp', srp_id=srp_id, A=a_pub, M1=m1, api_id=api_id)
+
+    async def call(self, act:str, **kw:Any)->dict[str,Any]:
+        if act in {'auth.checkPassword', 'auth_check_password'} and 'srp_id' not in kw:
+            return await self._auth_check_password_flow(str(kw.get('password') or ''), int(kw['api_id']))
+        return await self._rpc_call(act, **kw)
+
     async def spin(self)->None:
+        await self.auth_ready.wait()
         while not self.stop_ev.is_set():
             try:
                 pkt = await self.read_packet()

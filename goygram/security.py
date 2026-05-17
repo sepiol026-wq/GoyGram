@@ -128,7 +128,12 @@ async def _mt_req_with_migrate(app: Any, act: str, **kw: Any) -> dict[str, Any]:
         app.mt.stop_ev.clear()
         app.mt.host = endpoint.host
         app.mt.port = endpoint.port
+        app.mt.auth_key = None
+        app.mt.seq = 0
+        import secrets as _sec
+        app.mt.session_id = _sec.token_bytes(8)
         await app.mt.boot()
+        await app.mt.ensure_auth_key()
         log.warning("Migrated MT auth request to dc%s %s:%s", dc_id, endpoint.host, endpoint.port)
 
 async def _mt_auth_flow(app: Any, vault: Path, session_name: str, api_id: int | str | None = None, api_hash: str | None = None) -> dict[str, str] | None:
@@ -204,8 +209,8 @@ async def _mt_auth_flow(app: Any, vault: Path, session_name: str, api_id: int | 
                         print("Unexpected MT response for auth.checkPassword")
                         continue
                     check_err = _extract_error(check) or ""
-                    if "INVALID" in check_err or "ERROR" in check_err:
-                        print("Invalid 2FA password")
+                    if check_err:
+                        print(f"2FA error: {check_err}")
                         continue
                     final = check
                     break

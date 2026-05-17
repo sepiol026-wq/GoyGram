@@ -13,12 +13,6 @@ class DcEndpoint:
 
 def get_dynamic_dc_config(timeout: int = 6) -> dict[int, list[DcEndpoint]]:
     _ = timeout
-    # IMPORTANT:
-    # `https://core.telegram.org/getProxyConfig` returns MTProxy routes,
-    # not plain MTProto socket endpoints. MTProxy addresses/ports (often 8888)
-    # close a raw MTProto connection immediately, which breaks auth/login.
-    #
-    # Use well-known Telegram production DC endpoints for direct MTProto.
     by_dc: dict[int, list[DcEndpoint]] = {
         1: [DcEndpoint(dc_id=1, host="149.154.175.53", port=443)],
         2: [DcEndpoint(dc_id=2, host="149.154.167.50", port=443)],

@@ -1,3 +1,4 @@
+# CopyLeft 2026 github.com/sepiol026-wq | telegram:@samsepi0l_ovf. Licensed under AGPLv3.
 from __future__ import annotations
 import os, struct, secrets, time
 from dataclasses import dataclass
@@ -38,9 +39,14 @@ class IntermediateTransport:
         return len(payload).to_bytes(4, 'little') + payload
 
 class MsgIdGen:
+    def __init__(self)->None:
+        self.last_time=0
+        self.offset=0
     def next(self)->int:
-        t=int(time.time()*(2**32))
-        return (t//4)*4+1
+        now=int(time.time())
+        self.offset = self.offset + 4 if now == self.last_time else 0
+        self.last_time = now
+        return (now * (2**32)) + self.offset
 
 class MTMessage:
     @staticmethod
@@ -50,22 +56,25 @@ class MTCodec:
     REQ_PQ_MULTI=0xbe7e8ef1
     REQ_DH_PARAMS=0xd712e4be
     SET_CLIENT_DH_PARAMS=0xf5045f1f
+    P_Q_INNER_DATA=0x83c95aec
     P_Q_INNER_DATA_DC=0xa9f55f95
     CLIENT_DH_INNER=0x6643b654
     AUTH_SEND_CODE=0xa677244f
 
     AUTH_SIGN_IN=0x8d52a951
     AUTH_CHECK_PASSWORD=0xd18b4d16
+    ACCOUNT_GET_PASSWORD=0x548a30f5
+    INPUT_CHECK_PASSWORD_SRP=0xd27ff082
 
 
 
-    def auth_check_password(self, password:str, api_id:int)->bytes:
-        req=u32(self.AUTH_CHECK_PASSWORD)+tl_str(password)
-        init=u32(self.INIT_CONNECTION)+i32(api_id)+tl_str('goygram')+tl_str('0.4.1')+tl_str('linux')+tl_str('en')+tl_str('')+tl_str('en')+req
+    def auth_check_password(self, *, srp_id:int, A:bytes, M1:bytes, api_id:int)->bytes:
+        req=u32(self.AUTH_CHECK_PASSWORD)+u32(self.INPUT_CHECK_PASSWORD_SRP)+i64(srp_id)+tl_bytes(A)+tl_bytes(M1)
+        init=u32(self.INIT_CONNECTION)+i32(0)+i32(api_id)+tl_str('goygram')+tl_str('0.4.1')+tl_str('linux')+tl_str('en')+tl_str('')+tl_str('en')+req
         return u32(self.INVOKE_WITH_LAYER)+i32(self.LAYER)+init
     def auth_sign_in(self, phone:str, phone_code_hash:str, code:str, api_id:int)->bytes:
-        req=u32(self.AUTH_SIGN_IN)+tl_str(phone)+tl_str(phone_code_hash)+tl_str(code)
-        init=u32(self.INIT_CONNECTION)+i32(api_id)+tl_str('goygram')+tl_str('0.4.1')+tl_str('linux')+tl_str('en')+tl_str('')+tl_str('en')+req
+        req=u32(self.AUTH_SIGN_IN)+i32(1)+tl_str(phone)+tl_str(phone_code_hash)+tl_str(code)
+        init=u32(self.INIT_CONNECTION)+i32(0)+i32(api_id)+tl_str('goygram')+tl_str('0.4.1')+tl_str('linux')+tl_str('en')+tl_str('')+tl_str('en')+req
         return u32(self.INVOKE_WITH_LAYER)+i32(self.LAYER)+init
     INIT_CONNECTION=0xc1cd5ea9
     INVOKE_WITH_LAYER=0xda9b0d0d
@@ -81,6 +90,8 @@ class MTCodec:
     def set_client_dh_params(self, *, nonce:bytes, server_nonce:bytes, encrypted_data:bytes)->bytes:
         return u32(self.SET_CLIENT_DH_PARAMS)+nonce+server_nonce+tl_bytes(encrypted_data)
 
+    def p_q_inner_data(self, *, pq:bytes, p:bytes, q:bytes, nonce:bytes, server_nonce:bytes, new_nonce:bytes)->bytes:
+        return u32(self.P_Q_INNER_DATA)+tl_bytes(pq)+tl_bytes(p)+tl_bytes(q)+nonce+server_nonce+new_nonce
     def p_q_inner_data_dc(self, *, pq:bytes, p:bytes, q:bytes, nonce:bytes, server_nonce:bytes, new_nonce:bytes, dc:int)->bytes:
         return u32(self.P_Q_INNER_DATA_DC)+tl_bytes(pq)+tl_bytes(p)+tl_bytes(q)+nonce+server_nonce+new_nonce+i32(dc)
 
@@ -89,16 +100,28 @@ class MTCodec:
 
     def auth_send_code(self, phone:str, api_id:int, api_hash:str)->bytes:
         req=u32(self.AUTH_SEND_CODE)+tl_str(phone)+i32(api_id)+tl_str(api_hash)+u32(self.CODE_SETTINGS)+i32(0)
-        init=u32(self.INIT_CONNECTION)+i32(api_id)+tl_str('goygram')+tl_str('0.4.1')+tl_str('linux')+tl_str('en')+tl_str('')+tl_str('en')+req
+        init=u32(self.INIT_CONNECTION)+i32(0)+i32(api_id)+tl_str('goygram')+tl_str('0.4.1')+tl_str('linux')+tl_str('en')+tl_str('')+tl_str('en')+req
+        return u32(self.INVOKE_WITH_LAYER)+i32(self.LAYER)+init
+    def account_get_password(self, api_id:int)->bytes:
+        req=u32(self.ACCOUNT_GET_PASSWORD)
+        init=u32(self.INIT_CONNECTION)+i32(0)+i32(api_id)+tl_str('goygram')+tl_str('0.4.1')+tl_str('linux')+tl_str('en')+tl_str('')+tl_str('en')+req
         return u32(self.INVOKE_WITH_LAYER)+i32(self.LAYER)+init
 
 
 def factorize(pq:int)->tuple[int,int]:
     if pq%2==0: return 2,pq//2
-    x=2
-    while x*x<=pq:
-        if pq%x==0: return x,pq//x
-        x+=1
+    from math import gcd, isqrt
+    for c in range(1, 100):
+        x = secrets.randbelow(pq - 2) + 2
+        y = x
+        d = 1
+        while d == 1:
+            x = (x * x + c) % pq
+            y = (y * y + c) % pq
+            y = (y * y + c) % pq
+            d = gcd(abs(x - y), pq)
+        if d != pq:
+            return (min(d, pq // d), max(d, pq // d))
     raise ValueError('cant factorize pq')
 
 def kdf(new_nonce:bytes, server_nonce:bytes)->tuple[bytes,bytes]:
