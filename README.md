@@ -15,19 +15,29 @@
 
 Ultimate split-brain Telegram framework (Python + Rust core) built for production-grade speed, control, and maximum OpSec.
 
+Under the hood: a Python orchestration layer drives two completely independent network transports (Bot API over aiohttp + MTProto over raw TCP with full DH key exchange), both feeding into a single async event bus. Every crypto operation — AES-256-IGE for MTProto packets, AES-256-GCM for session vaults — runs in a Rust `.so` compiled with LTO and opt-level=3. Hand-written TL codec, no code generation at runtime. QR code login rendering in the terminal via `qrcode` + Rich. SRP password proofs for 2FA. And the vault: your auth key locked to your machine-id through PBKDF2-SHA256 at 600,000 iterations.
+
 ## Key Features
 - **Split-brain architecture**: ergonomic Python layer + blazing-fast Rust extension.
-- **Session Eater**: aggressive in-memory cleanup (zeroize strategy).
-- **Vault AES-GCM**: encrypted local session bootstrap.
-- **TUI auth flow**: terminal-first authorization workflow.
-- **Proxy support**: route traffic through your required network topology.
-- **Dual transport**: Bot API + MTProto (with API ID/API Hash) in one app runtime.
-- **Dynamic DC Routing**: MTProto nodes are fetched at startup from Telegram public config (no baked-in DC IP list).
+- **Session Eater**: aggressive in-memory cleanup (zeroize strategy for legacy `.session` files after migration).
+- **Vault AES-256-GCM**: encrypted local session bootstrap. Key derived from machine-id + session name via PBKDF2 (or bypass with `GOYGRAM_VAULT_KEY`).
+- **TUI auth flow**: terminal-first authorization workflow — phone login with SMS code, QR code scanning in ASCII art, 2FA/SRP password challenges. All Rich-styled when a TTY is present.
+- **Proxy support**: SOCKS5 (with user/pass auth) and HTTP CONNECT tunneling for MTProto connections. Also respects `ALL_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY` env vars.
+- **Dual transport**: Bot API (HTTP long-polling via aiohttp, multipart uploads, auto-webhook-clear on 409) + MTProto (raw TCP with AES-256-IGE, dynamic salt recovery on `bad_server_salt`, auto-DC migration on `PHONE_MIGRATE_N`) — in one app runtime.
+- **Dynamic DC Routing**: MTProto nodes are resolved at startup from a built-in DC map (5 Telegram DCs). Falls back to `149.154.167.50:443` (DC 2) if resolution fails.
+- **Dynamic API dispatch**: every Bot API method works via `__getattr__` — `sendAnimation`, `getUserProfilePhotos`, `setMyCommands`, whatever. Snake_case auto-converts to CamelCase. `mt_` prefix routes to MTProto.
+- **Keyboard system**: inline keyboards, reply keyboards, force reply, reply removal. All with `to_dict()` serialization that adapts per transport.
+- **Forum topic management**: full create/edit/close/reopen/delete lifecycle for forum topics and the General topic. Both transports supported.
+- **Zero-copy event objects**: `MsgObj`, `CbObj`, `PollObj`, `MemberObj` with `__slots__` — no per-message dict overhead.
+- **Composable filters**: boolean AND/OR/NOT on `Filter` (`filters.text & ~filters.me`).
+- **Multi-session**: named vaults (`session_name="worker_1"`) for farming multiple accounts from the same process. Separate auth keys, separate TCP connections, separate `self_id`.
 
 ## Installation
 ```bash
 pip install goygram
 ```
+
+Requires Python 3.11+. Rust is **not** required — pre-built wheels ship for Linux, Windows, and macOS (x86-64 + ARM64). Installs `aiohttp`, `pydantic`, `rich`, and `qrcode` as dependencies.
 
 ## Quick Start
 
@@ -76,7 +86,7 @@ asyncio.run(app.run())
 
 - By default, session data is stored in `default.vault`.
 - With `session_name="farm_worker_1"`, session data is stored in `farm_worker_1.vault`.
-- If `farm_worker_1.session` exists, it is migrated to `farm_worker_1.vault` during bootstrap.
+- If `farm_worker_1.session` exists, it is migrated to `farm_worker_1.vault` during bootstrap (securely zeroized after).
 
 ## Dynamic API & Methods
 GoyGram now supports **all Telegram methods out of the box** with dynamic dispatch:
@@ -92,6 +102,30 @@ GoyGram now supports **all Telegram methods out of the box** with dynamic dispat
   - `await app.mt_get_chat_full(chat_id=...)`
 
 This behavior is implemented through dynamic method resolution in the client core (`__getattr__`) and transport-aware request routing.
+
+## Authentication & Security
+
+### Interactive Login
+On first run with MTProto, GoyGram launches a Rich-powered TUI:
+
+```
+GoyGram Interactive Login
+
+? Choose login method:
+  > QR Code Login
+    Phone Number Login
+```
+
+Choose QR code (scan with any Telegram client) or phone number (SMS code). 2FA password is handled automatically via SRP proofs. The resulting session is stored as `default.vault` — AES-256-GCM encrypted, keyed to your machine.
+
+### Vault Encryption
+- **Algorithm**: AES-256-GCM (authenticated encryption via Rust's `aes-gcm` crate)
+- **Key derivation**: PBKDF2-HMAC-SHA256, 600,000 iterations, key material = `{machine-id}:{session_name}`
+- **Override**: `GOYGRAM_VAULT_KEY` env var (base64-encoded 32 bytes) bypasses PBKDF2 entirely
+- **Plain JSON fallback**: if decryption fails, tries reading as plain JSON (auto-re-encrypts on next save)
+
+### Session Migration
+Telethon/Pyrogram `.session` files are auto-detected, read from SQLite, migrated to `.vault`, and securely zeroized (overwrite + fsync + unlink).
 
 ## Developer Tools (Help)
 Use built-in introspection tools:
@@ -123,10 +157,62 @@ another = filters.text | filters.me
 async def handler(msg):
     await msg.reply("Filtered")
 ```
-## Wiki
-> 📚 **Looking for guides, API references, or multi-session farming?** > 
-> 👉 **[Check out the Official GoyGram Wiki!](https://github.com/sepiol026-wq/GoyGram/wiki)**
 
+Built-in filters: `filters.text` (message has text), `filters.me` (message from current account/bot). Compose with `&`, `|`, `~`. Custom filters: `Filter(lambda e: ...)`.
+
+## Transport Routing
+
+Messages can be routed explicitly by transport:
+
+```python
+# Force Bot API
+await app.send_msg("bot:123456789", "via bot", via="bot")
+
+# Force MTProto
+await app.send_msg("mt:123456789", "via mt", via="mt")
+```
+
+Chat ID prefixes (`bot:` / `mt:`) are auto-resolved. When replying, the transport source is preserved automatically — reply to a Bot API message, it goes back via Bot API.
+
+## Event Pipeline
+
+```
+BotNet.spin() ──→ bus.push("bot", data)
+                                          ──→ Disp.consume() → your handlers
+MTNet.spin() ──→ bus.push("mt", data)
+```
+
+Single `asyncio.Queue` → typed event objects (`MsgObj`/`CbObj`/`PollObj`/`MemberObj`) → handler lists in registration order. Per-handler error isolation — one crashing handler never takes down the dispatcher.
+
+## Logging
+
+```bash
+GOYGRAM_LOG=DEBUG python app.py   # verbose (raw MTProto packet dumps)
+GOYGRAM_LOG=INFO python app.py    # default (startup, errors)
+GOYGRAM_LOG=WARNING python app.py # quiet
+```
+
+Logger hierarchy: `goygram.app`, `goygram.botapi`, `goygram.mtproto`, `goygram.disp`, `goygram.security`, `goygram.dc`.
+
+## Architecture at a Glance
+
+```
+┌─────────────────────────────────────────────┐
+│             GoyGram (Public API)             │  ← User-facing facade
+├─────────────────────────────────────────────┤
+│        AppCore (Internal Engine)             │  ← Config, hooks, routing
+├──────────────────┬──────────────────────────┤
+│ BotNet (aiohttp) │   MTNet (TCP/MTProto)    │  ← Independent transports
+├──────────────────┴──────────────────────────┤
+│          Bus → Disp (Event Pipeline)         │  ← asyncio.Queue + dispatcher
+├─────────────────────────────────────────────┤
+│  goygram.ext (Rust .so) — AES-IGE/AES-GCM   │  ← Native crypto (LTO, opt=3)
+└─────────────────────────────────────────────┘
+```
+
+## Wiki
+> 📚 **55 pages of reverse-engineered documentation.** Every line of GoyGram, explained.
+> 👉 **[Check out the Official GoyGram Wiki!](https://github.com/sepiol026-wq/GoyGram/wiki)**
 
 ## License
 See [LICENSE](./LICENSE).
