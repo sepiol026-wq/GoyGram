@@ -270,7 +270,11 @@ def _extract_phone_code_hash(obj: dict[str, Any]) -> str | None:
 def _extract_user(obj: dict[str, Any]) -> dict[str, Any] | None:
     user = _field(obj, "user", "me")
     if isinstance(user, dict):
-        return user
+        uid = user.get("id") or user.get("user_id", 0)
+        if uid and uid != 0:
+            return user
+        if user.get("first_name") and user.get("first_name") not in ("Parse Error", "Unknown"):
+            return user
     if str(_field(obj, "kind", "type", "_", "constructor") or "").lower() == "user":
         return obj
     return None

@@ -1,9 +1,11 @@
 # CopyLeft 2026 github.com/sepiol026-wq | telegram:@samsepi0l_ovf. Licensed under AGPLv3.
 # Contains elements of Aiogram (MIT) / Pyrogram (LGPL-3.0)
 from __future__ import annotations
-import asyncio, hashlib, os, secrets, struct, urllib.parse
+import asyncio, hashlib, os, secrets, struct, urllib.parse, logging
 from hashlib import sha1, sha256
 from typing import Any
+
+log = logging.getLogger("goygram.mtproto")
 
 from .tl_core import IntermediateTransport, MTCodec, MTMessage, MsgIdGen, Reader, factorize, kdf, kdf_msg, rsa_pad_encrypt
 
@@ -146,56 +148,29 @@ def _skip_tl_object(b:bytes, p:int)->int:
 
 
 def _parse_user_obj(b:bytes)->dict[str,Any]|None:
+    if len(b) < 12:
+        return None
+    cid = int.from_bytes(b[:4], "little")
+    # known user constructors (Telegram layers 150+)
+    if cid in {0x020b1422, 0x8f97c628, 0x5c0d0a2a, 0xd8576e2a, 0x7fe4ab4, 0x2e13f2c3, 0xebe8e785}:
+        return _parse_user_obj_v4(b, cid)
+    log.warning("Unsupported user constructor 0x%08x, raw=%s", cid, b[:64].hex())
+    return None
+
+
+def _parse_user_obj_v4(b:bytes, cid:int)->dict[str,Any]|None:
     try:
-        if len(b) < 12:
-            return None
-        cid = int.from_bytes(b[:4], "little")
-        if cid == 0x020b1422:
+        p = 4
+        if cid in {0x8f97c628, 0x5c0d0a2a, 0xd8576e2a, 0x7fe4ab4, 0x2e13f2c3, 0xebe8e785}:
             p = 4
             flags = int.from_bytes(b[p:p+4], "little", signed=True); p += 4
-            user_id = int.from_bytes(b[p:p+8], "little", signed=True); p += 8
-            if flags & (1 << 0):
-                access_hash = int.from_bytes(b[p:p+8], "little", signed=True); p += 8
-            else:
-                access_hash = None
-            first_name = None
-            if flags & (1 << 1):
-                raw, p = _tl_bytes_at(b, p)
-                first_name = raw.decode("utf-8", errors="ignore")
-            last_name = None
-            if flags & (1 << 2):
-                raw, p = _tl_bytes_at(b, p)
-                last_name = raw.decode("utf-8", errors="ignore")
-            username = None
-            if flags & (1 << 3):
-                raw, p = _tl_bytes_at(b, p)
-                username = raw.decode("utf-8", errors="ignore")
-            phone = None
-            if flags & (1 << 4):
-                raw, p = _tl_bytes_at(b, p)
-                phone = raw.decode("utf-8", errors="ignore")
-            out = {"id": user_id}
-            if access_hash is not None:
-                out["access_hash"] = access_hash
-            if first_name:
-                out["first_name"] = first_name
-            if last_name:
-                out["last_name"] = last_name
-            if username:
-                out["username"] = username
-            if phone:
-                out["phone"] = phone
-            return out
-        if cid != 0x8f97c628 or len(b) < 20:
-            return {"id": 0, "first_name": "Unknown (Unsupported User Constructor)"}
-        p = 4
-        flags = int.from_bytes(b[p:p+4], "little", signed=True); p += 4
-        _flags2 = int.from_bytes(b[p:p+4], "little", signed=True); p += 4
+            _flags2 = int.from_bytes(b[p:p+4], "little", signed=True); p += 4
+        else:
+            flags = int.from_bytes(b[p:p+4], "little", signed=True); p += 4
         user_id = int.from_bytes(b[p:p+8], "little", signed=True); p += 8
+        access_hash = None
         if flags & (1 << 0):
             access_hash = int.from_bytes(b[p:p+8], "little", signed=True); p += 8
-        else:
-            access_hash = None
         first_name = None
         if flags & (1 << 1):
             raw, p = _tl_bytes_at(b, p)
@@ -205,7 +180,7 @@ def _parse_user_obj(b:bytes)->dict[str,Any]|None:
             raw, p = _tl_bytes_at(b, p)
             last_name = raw.decode("utf-8", errors="ignore")
         username = None
-        if flags & (1 << 3):
+        if flags & (1 << 3) or flags & (1 << 6):  # flag 6 = usernames vector in newer layers
             raw, p = _tl_bytes_at(b, p)
             username = raw.decode("utf-8", errors="ignore")
         phone = None
@@ -225,20 +200,47 @@ def _parse_user_obj(b:bytes)->dict[str,Any]|None:
             out["phone"] = phone
         return out
     except Exception:
-        return {"id": 0, "first_name": "Parse Error"}
+        log.warning("User parse failed for cid=0x%08x: %s", cid, b[:128].hex())
+        return None
 
 class ProxyCfg:
     def __init__(self, scheme:str, host:str, port:int, user:str|None=None, pwd:str|None=None)->None:
         self.scheme, self.host, self.port, self.user, self.pwd = scheme, host, port, user, pwd
 
 class MTNet:
-    def __init__(self, host:str, port:int, bus:Any, key:bytes|None=None, iv:bytes|None=None)->None:
+    def __init__(
+        self,
+        host:str,
+        port:int,
+        bus:Any,
+        key:bytes|None=None,
+        iv:bytes|None=None,
+        *,
+        app_name:str|None=None,
+        app_version:str|None=None,
+        device_model:str|None=None,
+        system_version:str|None=None,
+        system_lang_code:str="en",
+        lang_pack:str="",
+        lang_code:str="en",
+    )->None:
         self.host=host; self.port=port; self.bus=bus; self.key=key; self.iv=iv
         self.rd=None; self.wr=None; self.buf=bytearray(); self.stop_ev=asyncio.Event(); self.seq=0
         self.pending:dict[int,asyncio.Future[dict[str,Any]]]={}
-        self.transport=IntermediateTransport(); self.codec=MTCodec(); self.msg_ids=MsgIdGen(); self.wrote_tag=False
+        self.transport=IntermediateTransport(); self.codec=MTCodec(
+            app_name=app_name,
+            app_version=app_version,
+            device_model=device_model,
+            system_version=system_version,
+            system_lang_code=system_lang_code,
+            lang_pack=lang_pack,
+            lang_code=lang_code,
+        ); self.msg_ids=MsgIdGen(); self.wrote_tag=False
         self.auth_key:bytes|None=None; self.server_salt:bytes=b'\x00'*8; self.session_id=secrets.token_bytes(8)
         self.auth_ready=asyncio.Event()
+        self.qr_update_ev=asyncio.Event()
+        self._init_done=False
+        self._api_id:int|None=None
 
     def pick(self,obj:dict[str,Any],*keys:str)->Any:
         for k in keys:
@@ -372,10 +374,10 @@ class MTNet:
 
     def _log_socket_close(self)->None:
         if self.buf:
-            print(f"[RX] Socket closed. Left in buffer: {self.buf.hex()}")
+            log.debug(f"[RX] Socket closed. Left in buffer: {self.buf.hex()}")
             if len(self.buf) >= 4:
                 err = int.from_bytes(self.buf[:4], 'little', signed=True)
-                print(f"[RX] Possible Telegram int32 error: {err}")
+                log.debug(f"[RX] Possible Telegram int32 error: {err}")
 
     async def read_packet(self)->bytes:
         while True:
@@ -384,13 +386,13 @@ class MTNet:
             if not raw:
                 self._log_socket_close()
                 raise ConnectionError('mt socket closed')
-            print(f"[RX] <<< {raw.hex()}")
+            log.debug(f"[RX] <<< {raw.hex()}")
             self.buf.extend(raw)
 
     async def invoke_unencrypted(self, body:bytes)->bytes:
         await self.boot(); assert self.wr
         pkt=self.pack(MTMessage.unencrypted(self.msg_ids.next(), body))
-        print(f"[TX] >>> {pkt.hex()}")
+        log.debug(f"[TX] >>> {pkt.hex()}")
         self.wr.write(pkt); await self.wr.drain()
         resp=await self.read_packet(); return resp
 
@@ -398,6 +400,7 @@ class MTNet:
         r=Reader(pkt); _=r.i64(); _=r.i64(); ln=r.i32(); return r.take(ln)
 
     async def ensure_auth_key(self)->None:
+        await self.boot()
         if self.auth_key is not None:
             self.auth_ready.set()
             return
@@ -425,7 +428,7 @@ class MTNet:
         dec=bytes(rx.aes_ige_dec_raw(encrypted_answer,tmp_key,tmp_iv))
         answer=dec[20:]
         ra=Reader(answer); aid=ra.u32()
-        print(f'[DH] server_DH_inner_data cid={aid:#010x} (expected 0xb5890dba), dec_first32={dec[:32].hex()}')
+        log.debug(f'[DH] server_DH_inner_data cid={aid:#010x} (expected 0xb5890dba), dec_first32={dec[:32].hex()}')
         if aid!=0xb5890dba: raise RuntimeError(f'unexpected server_DH_inner_data cid={aid:#010x}')
         _=ra.take(16); _=ra.take(16); g=ra.i32(); dh_prime=int.from_bytes(ra.tl_bytes(),'big'); g_a=int.from_bytes(ra.tl_bytes(),'big'); _=ra.i32(); _=ra.i32()
         b=int.from_bytes(secrets.token_bytes(256),'big'); g_b=pow(g,b,dh_prime).to_bytes(256,'big')
@@ -437,6 +440,7 @@ class MTNet:
         if c!=0x3bcbf734: raise RuntimeError(f'dh_gen not ok: {c:x}')
         self.auth_key=pow(g_a,b,dh_prime).to_bytes(256,'big')
         self.server_salt=bytes(a^b for a,b in zip(new_nonce[:8],server_nonce[:8]))
+        self._init_done=False
         self.auth_ready.set()
 
     def _parse_phone_code_hash(self, result:bytes)->str|None:
@@ -488,15 +492,15 @@ class MTNet:
                 return
             rm = Reader(inner)
             cid = rm.u32()
+            if b'\x91\xe6\x4f\x56' in inner:
+                self.qr_update_ev.set()
             if cid == 0xf35c6d01:
                 if len(inner) < 12:
                     return
                 req_msg_id = rm.i64()
                 result = inner[12:]
-                print(f"[RPC-DBG] rpc_result req_msg_id={req_msg_id} pending_keys={list(self.pending.keys())}")
                 fut = self.pending.pop(req_msg_id, None)
                 if not fut or fut.done():
-                    print(f"[RPC-DBG] NO MATCH or done! fut={fut}")
                     return
                 try:
                     parsed = self._parse_rpc_result(result)
@@ -527,35 +531,21 @@ class MTNet:
         cid = int.from_bytes(result[:4], "little")
         if cid == 0x44747e9a:
             return {"ok": True, "auth_key": self.auth_key or b""}
-        if cid == 0xb5757299:
+        if cid in {0xb5757299, 0x922169ae}:
             p = 4
             flags = int.from_bytes(result[p:p+4], "little", signed=True); p += 4
-            p += 8
-            _, p = _tl_bytes_at(result, p)
-            _, p = _tl_bytes_at(result, p)
-            if flags & (1 << 1):
-                _, p = _tl_bytes_at(result, p)
             if flags & (1 << 4):
-                _, p = _tl_bytes_at(result, p)
-            _, p = _tl_bytes_at(result, p)
+                p += 4
             if flags & (1 << 0):
                 p += 4
-            _, p = _tl_bytes_at(result, p)
-            _, p = _tl_bytes_at(result, p)
-            _, p = _tl_bytes_at(result, p)
-            p += 4
-            if flags & (1 << 2):
-                p += 4
-            if flags & (1 << 3):
-                p += 4
-            if flags & (1 << 5):
-                p += 4
-            if flags & (1 << 6):
-                p += 4
+            if flags & (1 << 7):
+                _, p = _tl_bytes_at(result, p)
             user = _parse_user_obj(result[p:])
             out = {"ok": True, "auth_key": self.auth_key or b""}
             if user is not None:
                 out["user"] = user
+            if user is None:
+                log.warning("auth result: user parse failed, result[%d:]=%s", p, result[p:p+64].hex())
             return out
         if cid != 0x2ea2c0d4:
             return None
@@ -610,6 +600,32 @@ class MTNet:
             out["hint"] = hint.decode("utf-8", errors="ignore")
         return out
 
+    def _parse_login_token(self, result:bytes)->dict[str,Any]|None:
+        if len(result) < 4: return None
+        cid = int.from_bytes(result[:4], "little")
+        if cid == 0x629f1980:
+            r = Reader(result)
+            r.u32()
+            expires = r.i32()
+            token = r.tl_bytes()
+            return {"ok": True, "type": "loginToken", "expires": expires, "token": token}
+        if cid == 0x068e9916:
+            r = Reader(result)
+            r.u32()
+            dc_id = r.i32()
+            token = r.tl_bytes()
+            return {"ok": True, "type": "loginTokenMigrateTo", "dc_id": dc_id, "token": token}
+        if cid == 0x390d5c5e:
+            r = Reader(result)
+            r.u32()
+            auth_bytes = result[r.p:]
+            parsed = self._parse_auth_result(auth_bytes)
+            if parsed:
+                parsed["type"] = "loginTokenSuccess"
+                return parsed
+            return {"ok": True, "type": "loginTokenSuccess", "raw": auth_bytes.hex()}
+        return None
+
     def _parse_rpc_result(self, result:bytes)->dict[str,Any]:
         if len(result) >= 4:
             cid = int.from_bytes(result[:4], "little")
@@ -628,7 +644,6 @@ class MTNet:
                     result = _gz.decompress(compressed)
                 except Exception:
                     pass
-        print(f"[PARSE-DBG] result cid={int.from_bytes(result[:4], 'little'):#010x} len={len(result)}")
         auth = self._parse_auth_result(result)
         if auth is not None:
             return auth
@@ -638,36 +653,259 @@ class MTNet:
         phone_code_hash = self._parse_phone_code_hash(result)
         if phone_code_hash:
             return {"ok": True, "phone_code_hash": phone_code_hash}
+        login_token = self._parse_login_token(result)
+        if login_token is not None:
+            return login_token
         return {"ok": True, "raw_result_hex": result.hex()}
 
-    async def send(self, obj:dict[str,Any], req_msg_id:int|None=None)->int:
-        await self.ensure_auth_key()
-        if rx is None: raise RuntimeError('rx (goygram.ext._ext) is not available; cannot encrypt')
-        act = obj.get('act')
+    def _resolve_peer(self, obj:dict[str,Any])->bytes:
+        chat_id = obj.get('chat_id') or obj.get('peer')
+        access_hash = obj.get('access_hash', 0)
+        if chat_id is None:
+            return self.codec.input_peer_self()
+        if isinstance(chat_id, bytes):
+            return chat_id
+        if isinstance(chat_id, str):
+            if chat_id in ('self', 'me'):
+                return self.codec.input_peer_self()
+            if chat_id.lstrip('-').isdigit():
+                chat_id = int(chat_id)
+            else:
+                return self.codec.input_peer_self()
+        if isinstance(chat_id, int):
+            if chat_id == 0:
+                return self.codec.input_peer_self()
+            if chat_id > 0:
+                return self.codec.input_peer_user(chat_id, int(access_hash))
+            raw = -chat_id
+            if raw > 1000000000000:
+                channel_id = raw - 1000000000000
+                return self.codec.input_peer_channel(channel_id, int(access_hash))
+            return self.codec.input_peer_chat(raw)
+        return self.codec.input_peer_self()
+
+    def _resolve_channel(self, obj:dict[str,Any])->bytes:
+        chat_id = obj.get('chat_id') or obj.get('channel')
+        access_hash = obj.get('access_hash', 0)
+        if isinstance(chat_id, bytes):
+            return chat_id
+        if isinstance(chat_id, int):
+            if chat_id < 0:
+                raw = -chat_id
+                if raw > 1000000000000:
+                    channel_id = raw - 1000000000000
+                else:
+                    channel_id = raw
+            else:
+                channel_id = chat_id
+            return self.codec.input_channel(channel_id, int(access_hash))
+        return self.codec.input_channel(0, 0)
+
+    def _resolve_user(self, obj:dict[str,Any])->bytes:
+        user_id = obj.get('user_id')
+        access_hash = obj.get('access_hash', 0)
+        if user_id is None or (isinstance(user_id, str) and user_id in ('self', 'me')):
+            return self.codec.input_user_self()
+        if isinstance(user_id, bytes):
+            return user_id
+        return self.codec.input_user(int(user_id), int(access_hash))
+
+    def _build_body(self, act:str, obj:dict[str,Any])->bytes:
         if act in {'auth.sendCode', 'auth_send_code'}:
-            body=self.codec.auth_send_code(str(obj.get('phone_number') or obj.get('phone')), int(obj['api_id']), str(obj['api_hash']))
-        elif act in {'auth.signIn', 'auth_sign_in'}:
-            body=self.codec.auth_sign_in(
+            return self.codec.auth_send_code(str(obj.get('phone_number') or obj.get('phone')), int(obj['api_id']), str(obj['api_hash']))
+        if act in {'auth.signIn', 'auth_sign_in'}:
+            return self.codec.auth_sign_in(
                 str(obj.get('phone_number') or obj.get('phone')),
                 str(obj.get('phone_code_hash')),
                 str(obj.get('phone_code') or obj.get('code')),
                 int(obj['api_id'])
             )
-        elif act in {'account.getPassword', 'account_get_password'}:
-            body=self.codec.account_get_password(int(obj['api_id']))
-        elif act in {'auth.checkPasswordSrp', 'auth_check_password_srp'}:
-            body=self.codec.auth_check_password(
+        if act in {'account.getPassword', 'account_get_password'}:
+            return self.codec.account_get_password(int(obj['api_id']))
+        if act in {'auth.checkPasswordSrp', 'auth_check_password_srp'}:
+            return self.codec.auth_check_password(
                 srp_id=int(obj['srp_id']),
                 A=bytes(obj['A']),
                 M1=bytes(obj['M1']),
                 api_id=int(obj['api_id'])
             )
-        elif act == 'send_msg':
-            raise RuntimeError('send_msg is not available in low-level MT auth transport')
-        elif act == 'del_msg':
-            raise RuntimeError('del_msg is not available in low-level MT auth transport')
-        else:
-            raise NotImplementedError(act)
+        if act in {'auth.exportLoginToken', 'auth_export_login_token'}:
+            return self.codec.auth_export_login_token(int(obj['api_id']), str(obj['api_hash']), obj.get('except_ids', []))
+        if act in {'auth.importLoginToken', 'auth_import_login_token'}:
+            return self.codec.auth_import_login_token(bytes(obj['token']), int(obj['api_id']))
+        if act in {'auth.logOut', 'auth_log_out'}:
+            return self.codec.auth_log_out()
+        if act in {'messages.getDialogs', 'get_dialogs'}:
+            return self.codec.messages_get_dialogs(
+                limit=int(obj.get('limit', 100)),
+                exclude_pinned=bool(obj.get('exclude_pinned', False)),
+                folder_id=obj.get('folder_id'),
+                offset_date=int(obj.get('offset_date', 0)),
+                offset_id=int(obj.get('offset_id', 0)),
+                offset_peer=obj.get('offset_peer'),
+                hash=int(obj.get('hash', 0)),
+            )
+        if act in {'messages.getHistory', 'get_history'}:
+            peer = obj.get('peer') or self._resolve_peer(obj)
+            return self.codec.messages_get_history(
+                peer=peer if isinstance(peer, bytes) else self._resolve_peer(obj),
+                offset_id=int(obj.get('offset_id', 0)),
+                offset_date=int(obj.get('offset_date', 0)),
+                add_offset=int(obj.get('add_offset', 0)),
+                limit=int(obj.get('limit', 100)),
+                max_id=int(obj.get('max_id', 0)),
+                min_id=int(obj.get('min_id', 0)),
+                hash=int(obj.get('hash', 0)),
+            )
+        if act in {'messages.getMessages', 'get_messages'}:
+            ids = obj.get('ids') or obj.get('id') or []
+            if isinstance(ids, int):
+                ids = [ids]
+            return self.codec.messages_get_messages(ids=ids)
+        if act in {'messages.readHistory', 'read_history', 'mark_read'}:
+            return self.codec.messages_read_history(
+                peer=self._resolve_peer(obj),
+                max_id=int(obj.get('max_id', 0)),
+            )
+        if act in {'messages.search', 'search_messages'}:
+            return self.codec.messages_search(
+                peer=self._resolve_peer(obj),
+                q=str(obj.get('q', '')),
+                limit=int(obj.get('limit', 100)),
+                offset_id=int(obj.get('offset_id', 0)),
+            )
+        if act in {'messages.forwardMessages', 'forward_messages'}:
+            return self.codec.messages_forward_messages(
+                from_peer=self._resolve_peer({**obj, 'chat_id': obj.get('from_chat_id') or obj.get('from_peer')}),
+                to_peer=self._resolve_peer(obj),
+                ids=list(obj.get('ids') or obj.get('id') or []),
+                random_ids=[secrets.randbits(63) for _ in range(len(obj.get('ids') or obj.get('id') or []))],
+                silent=bool(obj.get('silent', False)),
+                drop_author=bool(obj.get('drop_author', False)),
+            )
+        if act in {'messages.sendMessage', 'send_msg'}:
+            peer = self._resolve_peer(obj)
+            reply_to = None
+            if obj.get('reply_to'):
+                reply_to = self.codec.input_reply_to_message(int(obj['reply_to']))
+            return self.codec.messages_send_message(
+                peer=peer,
+                message=str(obj.get('text') or obj.get('message') or ''),
+                random_id=secrets.randbits(63),
+                reply_to=reply_to,
+                no_webpage=bool(obj.get('no_webpage', False)),
+            )
+        if act in {'messages.editMessage', 'edit_msg'}:
+            return self.codec.messages_edit_message(
+                peer=self._resolve_peer(obj),
+                msg_id=int(obj.get('msg_id') or obj.get('message_id', 0)),
+                message=str(obj.get('text') or obj.get('message') or ''),
+                no_webpage=bool(obj.get('no_webpage', False)),
+            )
+        if act in {'messages.deleteMessages', 'del_msg', 'delete_messages'}:
+            ids = obj.get('ids') or obj.get('id')
+            if isinstance(ids, int):
+                ids = [ids]
+            if obj.get('msg_id'):
+                ids = [int(obj['msg_id'])]
+            return self.codec.messages_delete_messages(ids=ids or [], revoke=bool(obj.get('revoke', True)))
+        if act in {'channels.deleteMessages', 'channels_delete_messages'}:
+            ids = obj.get('ids') or obj.get('id')
+            if isinstance(ids, int):
+                ids = [ids]
+            return self.codec.channels_delete_messages(
+                channel=self._resolve_channel(obj),
+                ids=ids or [],
+            )
+        if act in {'messages.setTyping', 'send_typing'}:
+            return self.codec.messages_set_typing(peer=self._resolve_peer(obj))
+        if act in {'messages.getPinnedMessages', 'get_pinned_message', 'get_pinned_messages'}:
+            return self.codec.messages_get_pinned_messages(peer=self._resolve_peer(obj))
+        if act in {'messages.updatePinnedMessage', 'pin_message'}:
+            return self.codec.messages_update_pinned_message(
+                peer=self._resolve_peer(obj),
+                msg_id=int(obj.get('msg_id') or obj.get('message_id', 0)),
+                silent=bool(obj.get('silent', False)),
+                unpin=bool(obj.get('unpin', False)),
+            )
+        if act in {'messages.unpinAllMessages', 'unpin_message', 'unpin_all'}:
+            return self.codec.messages_update_pinned_message(
+                peer=self._resolve_peer(obj),
+                msg_id=int(obj.get('msg_id', 0)),
+                unpin=True,
+            )
+        if act in {'messages.saveDraft', 'save_draft'}:
+            return self.codec.messages_save_draft(
+                peer=self._resolve_peer(obj),
+                message=str(obj.get('message') or obj.get('text') or ''),
+                reply_to_msg_id=obj.get('reply_to_msg_id'),
+            )
+        if act in {'messages.getAllDrafts', 'clear_draft', 'get_all_drafts'}:
+            return self.codec.messages_get_all_drafts()
+        if act in {'messages.getAllChats', 'get_all_chats'}:
+            return self.codec.messages_get_all_chats(except_ids=obj.get('except_ids'))
+        if act in {'users.getUsers', 'get_users'}:
+            ids = obj.get('ids') or []
+            if not ids:
+                ids = [self.codec.input_user_self()]
+            elif isinstance(ids[0], int):
+                ids = [self.codec.input_user(uid, obj.get('access_hash', 0)) for uid in ids]
+            return self.codec.users_get_users(ids=ids)
+        if act in {'users.getFullUser', 'get_full_user', 'get_me'}:
+            if act == 'get_me':
+                user_id = self.codec.input_user_self()
+            else:
+                user_id = self._resolve_user(obj)
+            return self.codec.users_get_full_user(user_id=user_id)
+        if act in {'contacts.resolveUsername', 'resolve_peer', 'resolve_username'}:
+            username = str(obj.get('username') or obj.get('peer') or '')
+            if username.startswith('@'):
+                username = username[1:]
+            return self.codec.contacts_resolve_username(username=username)
+        if act in {'channels.getFullChannel', 'get_full_channel'}:
+            return self.codec.channels_get_full_channel(channel=self._resolve_channel(obj))
+        if act in {'channels.getParticipants', 'get_participants'}:
+            return self.codec.channels_get_participants(
+                channel=self._resolve_channel(obj),
+                offset=int(obj.get('offset', 0)),
+                limit=int(obj.get('limit', 200)),
+            )
+        if act in {'channels.joinChannel', 'join_channel'}:
+            return self.codec.channels_join_channel(channel=self._resolve_channel(obj))
+        if act in {'channels.leaveChannel', 'leave_channel'}:
+            return self.codec.channels_leave_channel(channel=self._resolve_channel(obj))
+        if act in {'channels.inviteToChannel', 'invite_to_channel'}:
+            users = obj.get('users') or []
+            if isinstance(users[0], int) if users else False:
+                users = [self.codec.input_user(uid, 0) for uid in users]
+            return self.codec.channels_invite_to_channel(channel=self._resolve_channel(obj), users=users)
+        if act in {'channels.editTitle', 'edit_title'}:
+            return self.codec.channels_edit_title(channel=self._resolve_channel(obj), title=str(obj.get('title', '')))
+        if act in {'channels.editAbout', 'edit_about'}:
+            return self.codec.channels_edit_about(channel=self._resolve_channel(obj), about=str(obj.get('about', '')))
+        if act in {'account.updateStatus', 'update_status'}:
+            return self.codec.account_update_status(offline=bool(obj.get('offline', False)))
+        if act in {'updates.getState', 'get_state'}:
+            return self.codec.updates_get_state()
+        if act in {'updates.getDifference', 'get_difference'}:
+            return self.codec.updates_get_difference(
+                pts=int(obj['pts']),
+                date=int(obj['date']),
+                qts=int(obj.get('qts', 0)),
+            )
+        raise NotImplementedError(f'MTProto method not implemented: {act}')
+
+    async def send(self, obj:dict[str,Any], req_msg_id:int|None=None)->int:
+        await self.ensure_auth_key()
+        if rx is None: raise RuntimeError('rx (goygram.ext._ext) is not available; cannot encrypt')
+        act = obj.get('act', '')
+        api_id = obj.get('api_id') or self._api_id
+        if api_id is not None:
+            self._api_id = int(api_id)
+        body = self._build_body(act, obj)
+        if not self._init_done and self._api_id:
+            body = self.codec.wrap_init(self._api_id, body)
+            self._init_done = True
         msg_id=req_msg_id if req_msg_id is not None else self.msg_ids.next()
         self.seq += 1; seq_no = self.seq * 2 - 1
         m=b''
@@ -678,7 +916,7 @@ class MTNet:
         aes_key,aes_iv=kdf_msg(self.auth_key,msg_key,True)
         enc=bytes(rx.aes_ige_enc_raw(m+pad,aes_key,aes_iv))
         pkt=self.pack(int.from_bytes(sha1(self.auth_key).digest()[-8:],'little').to_bytes(8,'little')+msg_key+enc)
-        print(f"[TX] >>> {pkt.hex()}")
+        log.debug(f"[TX] >>> {pkt.hex()}")
         self.wr.write(pkt); await self.wr.drain()
         return msg_id
 
@@ -710,30 +948,21 @@ class MTNet:
 
     async def _auth_check_password_flow(self, password:str, api_id:int)->dict[str,Any]:
         state = await self._rpc_call('account_get_password', api_id=api_id)
-        print(f"[2FA-DBG] state type={type(state).__name__} keys={list(state.keys()) if isinstance(state, dict) else 'N/A'}")
         if not isinstance(state, dict):
-            print("[2FA-DBG] FAIL: state is not dict")
             return {"ok": False, "error": "UNEXPECTED_PASSWORD_STATE", "raw": state}
         if not state.get("ok", True):
-            print(f"[2FA-DBG] FAIL: state ok={state.get('ok')}")
             return state
         if not state.get("has_password"):
-            print(f"[2FA-DBG] FAIL: has_password={state.get('has_password')}")
             return {"ok": False, "error": "PASSWORD_NOT_ENABLED", "error_message": "PASSWORD_NOT_ENABLED"}
         algo = state.get("current_algo")
         srp_b = state.get("srp_B")
         srp_id = state.get("srp_id")
-        print(f"[2FA-DBG] algo type={type(algo).__name__} srp_b type={type(srp_b).__name__ if srp_b is not None else 'None'} len={len(srp_b) if isinstance(srp_b,(bytes,bytearray)) else 'N/A'} srp_id={srp_id}")
         if not isinstance(algo, dict) or not isinstance(srp_b, (bytes, bytearray)) or srp_id is None:
-            print(f"[2FA-DBG] FAIL: invalid state types")
             return {"ok": False, "error": "INVALID_PASSWORD_STATE", "error_message": "INVALID_PASSWORD_STATE"}
-        print(f"[2FA-DBG] algo keys={list(algo.keys())} salt1 len={len(algo.get('salt1',b''))} salt2 len={len(algo.get('salt2',b''))} g={algo.get('g')} p len={len(algo.get('p',b''))}")
         try:
             srp_id, a_pub, m1 = _compute_password_check(state, password)
-            print(f"[2FA-DBG] SRP computed: srp_id={srp_id} A len={len(a_pub)} M1 len={len(m1)}")
         except Exception as exc:
             import traceback; traceback.print_exc()
-            print(f"[2FA-DBG] FAIL: SRP exception: {exc}")
             return {"ok": False, "error": "PASSWORD_SRP_BUILD_FAILED", "error_message": str(exc)}
         return await self._rpc_call('auth_check_password_srp', srp_id=srp_id, A=a_pub, M1=m1, api_id=api_id)
 
