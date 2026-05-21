@@ -502,6 +502,10 @@ class AppCore:
                 self.log.info("MT transport is enabled.")
                 tasks.append(asyncio.create_task(self.mt.spin(), name="mt"))
                 await bootstrap_session(self, api_id=self.api_id, api_hash=self.api_hash, session_name=self.session_name)
+                try:
+                    await self.mt_req('get_state')
+                except Exception:
+                    pass
             await self.stop_ev.wait()
         except (KeyboardInterrupt, asyncio.CancelledError):
             _instant_exit(None, None)
