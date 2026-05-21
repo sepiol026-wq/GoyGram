@@ -462,21 +462,21 @@ class MTNet:
                 return None
             _flags = r.i32()
             st = r.u32()
-            if st in {0x3dbb5986, 0xc000bba2, 0x5353e5a7, 0xab03c6d9, 0xe57b1432, 0x82006484, 0xa5491dea, 0xd9565c39}:
-                if st in {0x3dbb5986, 0xc000bba2, 0xab03c6d9}:
-                    _ = r.i32()
-                elif st == 0x5353e5a7:
-                    _ = r.tl_bytes()
-                elif st == 0xe57b1432:
-                    _, _ = r.tl_bytes(), r.tl_bytes()
-                    _ = r.i32()
-                elif st == 0x82006484:
-                    _ = r.tl_bytes()
-                    _ = r.i32()
-                elif st == 0xa5491dea:
-                    _, _ = r.i32(), r.i32()
-                elif st == 0xd9565c39:
-                    _ = r.i32()
+            # skip past sent code type object (variable size based on type cid)
+            if st in {0x3dbb5986, 0xc000bba2, 0xab03c6d9}:
+                _ = r.i32()
+            elif st == 0x5353e5a7:
+                _ = r.tl_bytes()
+            elif st == 0xe57b1432:
+                _, _ = r.tl_bytes(), r.tl_bytes()
+                _ = r.i32()
+            elif st == 0x82006484:
+                _ = r.tl_bytes()
+                _ = r.i32()
+            elif st == 0xa5491dea:
+                _, _ = r.i32(), r.i32()
+            elif st == 0xd9565c39:
+                _ = r.i32()
             v = r.tl_bytes().decode("utf-8", errors="ignore")
             if v:
                 return v
