@@ -5,6 +5,67 @@ import asyncio, hashlib, os, secrets, struct, urllib.parse, logging
 from hashlib import sha1, sha256
 from typing import Any
 
+import re as _re
+
+def _html_to_entities(text:str)->tuple[str, list[tuple[int,int,int,str|None]]]:
+    """Convert HTML tags to Telegram entities. Returns (cleaned_text, entities_list).
+    Each entity: (offset, length, type_code, url_or_None)
+    Type codes: 1=bold, 2=italic, 3=underline, 4=strikethrough, 5=code, 6=pre, 7=text_link, 8=text_mention
+    """
+    tags = {
+        'b': 1, 'strong': 1,
+        'i': 2, 'em': 2,
+        'u': 3, 'ins': 3,
+        's': 4, 'strike': 4, 'del': 4,
+        'code': 5,
+        'pre': 6,
+    }
+    entities: list[tuple[int,int,int,str|None]] = []
+    stack: list[tuple[int,str,str|None]] = []  # (start_pos, tag, url)
+    result: list[str] = []
+    pos = 0
+    it = _re.finditer(r'</?([a-zA-Z][a-zA-Z0-9]*)(?:\s+[^>]*)?>', text)
+    last_end = 0
+    for m in it:
+        tag = m.group(1).lower()
+        is_close = m.group(0).startswith('</')
+        result.append(text[last_end:m.start()])
+        written = len(''.join(result))
+        if is_close:
+            while stack:
+                start, otag, url = stack.pop()
+                if otag == tag:
+                    length = written - start
+                    if length > 0:
+                        if otag in tags:
+                            entities.append((start, length, tags[otag], None))
+                        elif otag == 'a':
+                            if url:
+                                entities.append((start, length, 7, url))
+                    break
+        else:
+            if tag in tags:
+                stack.append((written, tag, None))
+            elif tag == 'a':
+                href = _re.search(r'href=["\']([^"\']*)["\']', m.group(0))
+                url = href.group(1) if href else None
+                stack.append((written, 'a', url))
+        last_end = m.end()
+        pos = written
+    result.append(text[last_end:])
+    cleaned = ''.join(result)
+    # apply remaining unclosed tags
+    written = len(cleaned)
+    while stack:
+        start, otag, url = stack.pop()
+        length = written - start
+        if length > 0:
+            if otag in tags:
+                entities.append((start, length, tags[otag], None))
+            elif otag == 'a' and url:
+                entities.append((start, length, 7, url))
+    return cleaned, entities
+
 log = logging.getLogger("goygram.mtproto")
 
 from .tl_core import IntermediateTransport, MTCodec, MTMessage, MsgIdGen, Reader, factorize, kdf, kdf_msg, rsa_pad_encrypt
@@ -947,12 +1008,17 @@ class MTNet:
             reply_to = None
             if obj.get('reply_to'):
                 reply_to = self.codec.input_reply_to_message(int(obj['reply_to']))
+            text = str(obj.get('text') or obj.get('message') or '')
+            entities = None
+            if obj.get('parse_mode') == 'HTML':
+                text, entities = _html_to_entities(text)
             return self.codec.messages_send_message(
                 peer=peer,
-                message=str(obj.get('text') or obj.get('message') or ''),
+                message=text,
                 random_id=secrets.randbits(63),
                 reply_to=reply_to,
                 no_webpage=bool(obj.get('no_webpage', False)),
+                entities=entities,
             )
         if act in {'messages.editMessage', 'edit_msg'}:
             return self.codec.messages_edit_message(
