@@ -510,7 +510,8 @@ class MTNet:
                     return
                 req_msg_id = rm.i64()
                 result = inner[12:]
-                fut = self.pending.pop(req_msg_id, None)
+                entry = self.pending.pop(req_msg_id, None)
+                fut = entry[0] if isinstance(entry, tuple) else entry
                 if not fut or fut.done():
                     return
                 try:
@@ -569,7 +570,76 @@ class MTNet:
                 except Exception:
                     pass
                 return
-            log.debug("Unhandled update cid=0x%08x", cid)
+            if cid in {0x74ae4240, 0x725b04c3}:
+                try:
+                    vec_cid = rm.u32()
+                    if vec_cid == 0x1cb5c415:
+                        upds = rm.i32()
+                        for _ in range(min(upds, 50)):
+                            _consume(inner[rm.p:rm.p+40] if rm.p+40 <= len(inner) else inner[rm.p:])
+                except Exception:
+                    pass
+                return
+            if cid == 0xedab447b:
+                try:
+                    bad_msg_id = rm.i64()
+                    _bad_seq = rm.i32()
+                    _error_code = rm.i32()
+                    new_salt = int.from_bytes(rm.take(8), 'little', signed=False)
+                    self.server_salt = new_salt.to_bytes(8, 'little')
+                    self._init_done = False
+                    log.warning('Server salt updated to 0x%x, retrying msg %s', new_salt, bad_msg_id)
+                    entry = self.pending.pop(bad_msg_id, None)
+                    if entry is not None:
+                        fut, saved_obj = entry
+                        if not fut.done():
+                            new_msg_id = self.msg_ids.next()
+                            self.pending[new_msg_id] = (fut, saved_obj)
+                            asyncio.create_task(self._resend(new_msg_id, saved_obj))
+                except Exception as exc:
+                    log.error('bad_server_salt handler error: %r', exc)
+                return
+            if cid == 0xa7eff811:
+                try:
+                    bad_msg_id = rm.i64()
+                    _bad_seq = rm.i32()
+                    _error_code = rm.i32()
+                    log.warning('bad_msg_notification for msg_id=%s code=%s', bad_msg_id, _error_code)
+                    fut = self.pending.pop(bad_msg_id, None)
+                    if fut and not fut.done():
+                        fut.set_exception(ConnectionError(f'bad_msg_notification code={_error_code}'))
+                except Exception:
+                    pass
+                return
+            if cid == 0x9ec20908:
+                try:
+                    _first_msg_id = rm.i64()
+                    _unique_id = rm.i64()
+                    new_salt = int.from_bytes(rm.take(8), 'little', signed=False)
+                    self.server_salt = new_salt.to_bytes(8, 'little')
+                    self._init_done = False
+                    log.info('New session created, salt=0x%x', new_salt)
+                except Exception:
+                    pass
+                return
+            if cid == 0x62d6b459:
+                return
+                try:
+                    _flags = rm.i32()
+                    _msg_id = rm.i32()
+                    _pts = rm.i32()
+                    _pts_count = rm.i32()
+                    _date = rm.i32()
+                    if _flags & (1 << 2):
+                        _ = rm.tl_bytes()
+                    if _flags & (1 << 9):
+                        _cnt = rm.i32()
+                        for _ in range(_cnt):
+                            _ = rm.i32() if rm.i32() else None
+                except Exception:
+                    pass
+                return
+            log.warning("Unhandled update cid=0x%08x", cid)
             return
 
         _consume(msg)
@@ -944,6 +1014,17 @@ class MTNet:
             )
         raise NotImplementedError(f'MTProto method not implemented: {act}')
 
+    async def _resend(self, msg_id:int, obj:dict[str,Any])->None:
+        try:
+            await self.send(obj, req_msg_id=msg_id)
+        except Exception as e:
+            log.error('Resend failed for msg_id=%s: %r', msg_id, e)
+            fut = self.pending.pop(msg_id, None)
+            if isinstance(fut, tuple):
+                fut = fut[0]
+            if fut and not fut.done():
+                fut.set_exception(e)
+
     async def send(self, obj:dict[str,Any], req_msg_id:int|None=None)->int:
         await self.ensure_auth_key()
         if rx is None: raise RuntimeError('rx (goygram.ext._ext) is not available; cannot encrypt')
@@ -986,8 +1067,8 @@ class MTNet:
         loop = asyncio.get_running_loop()
         fut:asyncio.Future[dict[str,Any]] = loop.create_future()
         req_msg_id = self.msg_ids.next()
-        self.pending[req_msg_id] = fut
         obj={'act':act}; obj.update({k:v for k,v in kw.items() if v is not None})
+        self.pending[req_msg_id] = (fut, obj)
         try:
             await self.send(obj, req_msg_id=req_msg_id)
             return await asyncio.wait_for(fut, timeout=30.0)
@@ -1027,7 +1108,8 @@ class MTNet:
                 pkt = await self.read_packet()
                 self._handle_encrypted_packet(pkt)
             except ConnectionError as exc:
-                for fut in self.pending.values():
+                for entry in self.pending.values():
+                    fut = entry[0] if isinstance(entry, tuple) else entry
                     if not fut.done():
                         fut.set_exception(exc)
                 self.pending.clear()
