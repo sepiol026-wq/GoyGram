@@ -211,7 +211,7 @@ Logger hierarchy: `goygram.app`, `goygram.botapi`, `goygram.mtproto`, `goygram.d
 ```
 
 ## Wiki
-> 📚 **55 pages of reverse-engineered documentation.** Every line of GoyGram, explained.
+> 📚 **55 pages of documentation...** Every line of GoyGram, explained.
 > 👉 **[Check out the Official GoyGram Wiki!](https://github.com/sepiol026-wq/GoyGram/wiki)**
 
 ## License
