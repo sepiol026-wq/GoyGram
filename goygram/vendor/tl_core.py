@@ -336,11 +336,21 @@ class MTCodec:
         raw = u32(0x1cb5c415) + i32(len(entities))
         for offset, length, tp, url in entities:
             if tp == 7 and url:
-                raw += u32(0x1f173e70) + i32(offset) + i32(length) + tl_str(url)
+                raw += u32(0x76a6d327) + i32(offset) + i32(length) + tl_str(url)
             elif tp == 8 and url:
-                raw += u32(0xb5a1e3a0) + i32(offset) + i32(length) + tl_str(url)
-            else:
-                raw += u32(0x3d3e9c6f) + i32(offset) + i32(length)
+                raw += u32(0x352955c9) + i32(offset) + i32(length) + i64(int(url))
+            elif tp == 1:
+                raw += u32(0xbd610bc9) + i32(offset) + i32(length)
+            elif tp == 2:
+                raw += u32(0x826f8b60) + i32(offset) + i32(length)
+            elif tp == 3:
+                raw += u32(0xe04bb623) + i32(offset) + i32(length)
+            elif tp == 4:
+                raw += u32(0xbfa8f802) + i32(offset) + i32(length)
+            elif tp == 5:
+                raw += u32(0x28a20571) + i32(offset) + i32(length)
+            elif tp == 6:
+                raw += u32(0x73924be0) + i32(offset) + i32(length) + tl_str('')
         return raw
     def messages_edit_message(
         self,
