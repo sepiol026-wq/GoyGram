@@ -575,24 +575,27 @@ class MTNet:
                     vec_cid = rm.u32()
                     if vec_cid == 0x1cb5c415:
                         upds = rm.i32()
-                        for _ in range(min(upds, 50)):
-                            _consume(inner[rm.p:rm.p+40] if rm.p+40 <= len(inner) else inner[rm.p:])
+                        for _ in range(min(upds, 20)):
+                            if rm.p + 4 > len(inner):
+                                break
+                            up_cid = int.from_bytes(inner[rm.p:rm.p+4], 'little')
+                            if up_cid in {0x1f2b0afd, 0x3131d92f, 0x384523f4}:
+                                _consume(inner[rm.p:])
+                                break
+                            else:
+                                rm.p += 4
                 except Exception:
                     pass
                 return
             if cid == 0x78d4dec1:
                 try:
-                    _ = rm.i32()
-                    rest = inner[rm.p:]
-                    if rest:
-                        _consume(rest)
+                    _consume(inner[4:])
                 except Exception:
                     pass
                 return
             if cid == 0x1f2b0afd:
                 try:
-                    _ = rm.u32()
-                    msg_obj = inner[rm.p:]
+                    msg_obj = inner[4:]
                     parsed = self._parse_new_message(msg_obj)
                     if parsed:
                         asyncio.ensure_future(self.bus.push("mt", parsed))
@@ -1045,63 +1048,44 @@ class MTNet:
         raise NotImplementedError(f'MTProto method not implemented: {act}')
 
     def _parse_new_message(self, data:bytes)->dict[str,Any]|None:
-        if len(data) < 16:
-            return None
-        cid = int.from_bytes(data[:4], 'little')
-        if cid not in {0xd8f8a1f0, 0x22eb7f97, 0x7b9f6e7c, 0xf2ebdb4e, 0xa5db5cb6, 0x84a4ffe5, 0x9c84bc1a, 0x1c9e8e6f, 0x508e3195, 0x90a5fcf4, 0xa5a1c1f5, 0x5c18a155, 0xcc2c32c5, 0x73484a3c, 0xe782f6d4, 0x8f1d7b9b, 0x6a3c7b9f}:
+        if len(data) < 20:
             return None
         try:
+            msg_cid = int.from_bytes(data[:4], 'little')
+            # common message constructors
+            known_msg_cids = {
+                0xd8f8a1f0, 0x22eb7f97, 0x7b9f6e7c, 0xf2ebdb4e,
+                0xa5db5cb6, 0x84a4ffe5, 0x9c84bc1a, 0x1c9e8e6f,
+                0x508e3195, 0x90a5fcf4, 0xa5a1c1f5, 0x5c18a155,
+                0xcc2c32c5, 0x73484a3c, 0xe782f6d4, 0x8f1d7b9b, 0x6a3c7b9f,
+            }
+            if msg_cid not in known_msg_cids:
+                return None
             r = Reader(data)
-            r.u32()
-            flags = r.i32()
+            r.u32(); flags = r.i32()
             msg_id = r.i32()
             from_id = None
             if flags & (1 << 8):
-                from_peer_cid = int.from_bytes(data[r.p:r.p+4], 'little')
-                if from_peer_cid == 0x2e4a13f5:
-                    r.u32()
-                    from_id = r.i64()
-                else:
-                    r.u32()
-                    _ = r.i64(); _ = r.i64()
-            r.u32()
-            if flags & (1 << 2):
-                _ = r.tl_bytes()
-                _ = r.i32()
-            if flags & (1 << 3):
-                cid2 = int.from_bytes(data[r.p:r.p+4], 'little')
-                if cid2 == 0x2e4a13f5:
-                    r.u32()
-                    _ = r.i64()
-                else:
-                    r.u32()
-                    _ = r.i64(); _ = r.i64()
-            if flags & (1 << 13):
-                _ = r.i64()
-            if flags & (1 << 6):
-                _ = r.tl_bytes()
-            if flags & (1 << 7):
-                _ = r.tl_bytes()
-            if flags & (1 << 11):
-                _ = r.tl_bytes()
-            if flags & (1 << 21):
-                _ = r.tl_bytes()
-            if flags & (1 << 9):
-                _ = r.tl_bytes()
-            _ = r.i32()
+                r.u32()  # peer cid
+                r.i64()
+            r.u32()  # peer_id cid
+            if flags & (1 << 2): r.tl_bytes()
+            if flags & (1 << 3): r.u32(); r.i64()
+            if flags & (1 << 13): r.i64()
+            if flags & (1 << 6): r.tl_bytes()
+            if flags & (1 << 7): r.tl_bytes()
+            if flags & (1 << 11): r.tl_bytes()
+            if flags & (1 << 21): r.tl_bytes()
+            if flags & (1 << 9): r.tl_bytes()
+            r.i32()  # date
             txt = ''
-            if flags & (1 << 17):
-                _ = r.tl_bytes()
-            else:
+            if not (flags & (1 << 17)):
                 txt = r.tl_bytes().decode('utf-8', errors='ignore')
             sid = getattr(self, 'self_id', 0) or 0
             return {
-                'kind': 'msg',
-                'msg_id': msg_id,
-                'chat_id': from_id or sid,
-                'from_id': from_id,
-                'text': txt,
-                'is_me': bool(from_id and sid and from_id == sid),
+                'kind': 'msg', 'msg_id': msg_id,
+                'chat_id': from_id or sid, 'from_id': from_id,
+                'text': txt, 'is_me': False,
             }
         except Exception:
             return None
