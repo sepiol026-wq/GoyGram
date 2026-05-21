@@ -136,13 +136,13 @@ class AppCore:
         return fn
 
     def on_cmd(self, *name: str) -> Callable[[Fn], Fn]:
-        cmd = {x.lower().lstrip("/.") for x in name}
+        cmd = {x.lower() for x in name}
         def wrap(fn: Fn) -> Fn:
             async def inner(msg: MsgObj) -> Any:
                 txt = (msg.text or "").strip()
-                if not txt or txt[0] not in "/.":
+                if not txt:
                     return None
-                head = txt.split(None, 1)[0][1:]
+                head = txt.split(None, 1)[0]
                 base = head.split("@", 1)[0].lower()
                 if base not in cmd:
                     return None
