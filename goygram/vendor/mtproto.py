@@ -580,6 +580,34 @@ class MTNet:
                 except Exception:
                     pass
                 return
+            if cid == 0x78d4dec1:
+                try:
+                    _ = rm.i32()
+                    rest = inner[rm.p:]
+                    if rest:
+                        _consume(rest)
+                except Exception:
+                    pass
+                return
+            if cid == 0x1f2b0afd:
+                try:
+                    _ = rm.u32()
+                    msg_obj = inner[rm.p:]
+                    parsed = self._parse_new_message(msg_obj)
+                    if parsed:
+                        asyncio.ensure_future(self.bus.push("mt", parsed))
+                except Exception:
+                    pass
+                return
+            if cid == 0x3072cfa1:
+                try:
+                    import gzip as _gz
+                    packed = rm.tl_bytes()
+                    decompressed = _gz.decompress(packed)
+                    _consume(decompressed)
+                except Exception:
+                    pass
+                return
             if cid == 0xedab447b:
                 try:
                     bad_msg_id = rm.i64()
@@ -1013,6 +1041,68 @@ class MTNet:
                 qts=int(obj.get('qts', 0)),
             )
         raise NotImplementedError(f'MTProto method not implemented: {act}')
+
+    def _parse_new_message(self, data:bytes)->dict[str,Any]|None:
+        if len(data) < 16:
+            return None
+        cid = int.from_bytes(data[:4], 'little')
+        if cid not in {0xd8f8a1f0, 0x22eb7f97, 0x7b9f6e7c, 0xf2ebdb4e, 0xa5db5cb6, 0x84a4ffe5, 0x9c84bc1a, 0x1c9e8e6f, 0x508e3195, 0x90a5fcf4, 0xa5a1c1f5, 0x5c18a155, 0xcc2c32c5, 0x73484a3c, 0xe782f6d4, 0x8f1d7b9b, 0x6a3c7b9f}:
+            return None
+        try:
+            r = Reader(data)
+            r.u32()
+            flags = r.i32()
+            msg_id = r.i32()
+            from_id = None
+            if flags & (1 << 8):
+                from_peer_cid = int.from_bytes(data[r.p:r.p+4], 'little')
+                if from_peer_cid == 0x2e4a13f5:
+                    r.u32()
+                    from_id = r.i64()
+                else:
+                    r.u32()
+                    _ = r.i64(); _ = r.i64()
+            r.u32()
+            if flags & (1 << 2):
+                _ = r.tl_bytes()
+                _ = r.i32()
+            if flags & (1 << 3):
+                cid2 = int.from_bytes(data[r.p:r.p+4], 'little')
+                if cid2 == 0x2e4a13f5:
+                    r.u32()
+                    _ = r.i64()
+                else:
+                    r.u32()
+                    _ = r.i64(); _ = r.i64()
+            if flags & (1 << 13):
+                _ = r.i64()
+            if flags & (1 << 6):
+                _ = r.tl_bytes()
+            if flags & (1 << 7):
+                _ = r.tl_bytes()
+            if flags & (1 << 11):
+                _ = r.tl_bytes()
+            if flags & (1 << 21):
+                _ = r.tl_bytes()
+            if flags & (1 << 9):
+                _ = r.tl_bytes()
+            _ = r.i32()
+            txt = ''
+            if flags & (1 << 17):
+                _ = r.tl_bytes()
+            else:
+                txt = r.tl_bytes().decode('utf-8', errors='ignore')
+            sid = getattr(self, 'self_id', 0) or 0
+            return {
+                'kind': 'msg',
+                'msg_id': msg_id,
+                'chat_id': from_id or sid,
+                'from_id': from_id,
+                'text': txt,
+                'is_me': bool(from_id and sid and from_id == sid),
+            }
+        except Exception:
+            return None
 
     async def _resend(self, msg_id:int, obj:dict[str,Any])->None:
         try:
