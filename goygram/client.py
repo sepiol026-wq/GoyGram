@@ -51,7 +51,21 @@ class AppCfg(BaseModel):
 
 
 class AppCore:
-    def __init__(self, cfg: AppCfg, api_id: int | str | None = None, api_hash: str | None = None, session_name: str = "default") -> None:
+    def __init__(
+        self,
+        cfg: AppCfg,
+        api_id: int | str | None = None,
+        api_hash: str | None = None,
+        session_name: str = "default",
+        *,
+        app_name: str | None = None,
+        app_version: str | None = None,
+        device_model: str | None = None,
+        system_version: str | None = None,
+        system_lang_code: str = "en",
+        lang_pack: str = "",
+        lang_code: str = "en",
+    ) -> None:
         self.cfg = cfg
         self.bus = Bus(cfg.bus_max)
         self.bot = None
@@ -65,7 +79,22 @@ class AppCore:
         if cfg.mt:
             from goygram.vendor.mtproto import MTNet
 
-            self.mt = MTNet(cfg.mt.host, cfg.mt.port, self.bus, cfg.mt.key, cfg.mt.iv)
+            self.mt = MTNet(
+                cfg.mt.host,
+                cfg.mt.port,
+                self.bus,
+                cfg.mt.key,
+                cfg.mt.iv,
+                app_name=app_name,
+                app_version=app_version,
+                device_model=device_model,
+                system_version=system_version,
+                system_lang_code=system_lang_code,
+                lang_pack=lang_pack,
+                lang_code=lang_code,
+            )
+            if api_id is not None:
+                self.mt._api_id = int(api_id)
         self.disp = Disp(self, self.bus)
         self.hook: list[Fn] = []
         self.cb_hook: list[CbFn] = []
@@ -107,11 +136,11 @@ class AppCore:
         return fn
 
     def on_cmd(self, *name: str) -> Callable[[Fn], Fn]:
-        cmd = {x.lower().lstrip("/") for x in name}
+        cmd = {x.lower().lstrip("/.") for x in name}
         def wrap(fn: Fn) -> Fn:
             async def inner(msg: MsgObj) -> Any:
                 txt = (msg.text or "").strip()
-                if not txt.startswith("/"):
+                if not txt or txt[0] not in "/.":
                     return None
                 head = txt.split(None, 1)[0][1:]
                 base = head.split("@", 1)[0].lower()
@@ -327,6 +356,10 @@ class AppCore:
         if self.mt is None:
             raise RuntimeError("mt net is not configured")
         data = {k: v.to_dict() if hasattr(v, "to_dict") else v for k, v in kw.items() if v is not None}
+        if 'api_id' not in data and self.api_id is not None:
+            data['api_id'] = self.api_id
+        if 'api_hash' not in data and self.api_hash is not None:
+            data['api_hash'] = self.api_hash
         if hasattr(self.mt, "call"):
             return await self.mt.call(act, **data)
         if hasattr(self.mt, "req"):
@@ -447,26 +480,31 @@ class AppCore:
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            try:
-                loop.add_signal_handler(sig, self.stop)
-            except Exception:
-                continue
+        def _instant_exit(signum: Any, frame: Any) -> None:
+            print("\nProcess interrupted by user. Exiting...")
+            import os
+            os._exit(0)
+        import signal
+        signal.signal(signal.SIGINT, _instant_exit)
+        signal.signal(signal.SIGTERM, _instant_exit)
         self.log.info("Starting GoyGram core.")
-        tasks = [asyncio.create_task(self.disp.consume(), name="disp")]
-        if self.bot:
-            self.log.info("Bot transport is enabled.")
-            try:
-                await self.delete_webhook(drop_pending_updates=False)
-            except Exception as e:
-                self.log.error("Failed to clear webhook before polling: %r", e)
-            tasks.append(asyncio.create_task(self.bot.spin(), name="bot"))
-        if self.mt:
-            self.log.info("MT transport is enabled.")
-            tasks.append(asyncio.create_task(self.mt.spin(), name="mt"))
-            await bootstrap_session(self, api_id=self.api_id, api_hash=self.api_hash, session_name=self.session_name)
+        tasks = []
         try:
+            tasks.append(asyncio.create_task(self.disp.consume(), name="disp"))
+            if self.bot:
+                self.log.info("Bot transport is enabled.")
+                try:
+                    await self.delete_webhook(drop_pending_updates=False)
+                except Exception as e:
+                    self.log.error("Failed to clear webhook before polling: %r", e)
+                tasks.append(asyncio.create_task(self.bot.spin(), name="bot"))
+            if self.mt:
+                self.log.info("MT transport is enabled.")
+                tasks.append(asyncio.create_task(self.mt.spin(), name="mt"))
+                await bootstrap_session(self, api_id=self.api_id, api_hash=self.api_hash, session_name=self.session_name)
             await self.stop_ev.wait()
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            _instant_exit(None, None)
         finally:
             await self.close()
             for task in tasks:
@@ -488,6 +526,13 @@ class GoyGram:
         api_id: int | str | None = None,
         api_hash: str | None = None,
         session_name: str = "default",
+        app_name: str | None = None,
+        app_version: str | None = None,
+        device_model: str | None = None,
+        system_version: str | None = None,
+        system_lang_code: str = "en",
+        lang_pack: str = "",
+        lang_code: str = "en",
     ) -> None:
         bot = BotCfg(token=bot_token, timeout=bot_timeout, base=bot_base) if bot_token is not None else None
         log = get_logger("goygram.dc")
@@ -506,7 +551,19 @@ class GoyGram:
                 log.warning("Using fallback MT endpoint %s:%s", resolved_host, resolved_port)
 
         mt = MtCfg(host=resolved_host, port=resolved_port, key=mt_key, iv=mt_iv) if resolved_host is not None and resolved_port is not None else None
-        self.core = AppCore(AppCfg(bot=bot, mt=mt, bus_max=bus_max), api_id=api_id, api_hash=api_hash, session_name=session_name)
+        self.core = AppCore(
+            AppCfg(bot=bot, mt=mt, bus_max=bus_max),
+            api_id=api_id,
+            api_hash=api_hash,
+            session_name=session_name,
+            app_name=app_name,
+            app_version=app_version,
+            device_model=device_model,
+            system_version=system_version,
+            system_lang_code=system_lang_code,
+            lang_pack=lang_pack,
+            lang_code=lang_code,
+        )
 
     def on_msg(self, fn: Fn | None = None, filt: Filter | None = None):
         return self.core.on_msg(fn, filt=filt)

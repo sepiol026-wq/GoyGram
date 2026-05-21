@@ -16,3 +16,5 @@ target/
 *.dll
 .DS_Store
 test.py
+test_*.py
+*.vault

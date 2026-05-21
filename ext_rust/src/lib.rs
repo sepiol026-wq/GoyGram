@@ -2,6 +2,8 @@
 use aes::cipher::generic_array::GenericArray;
 use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
 use aes::Aes256;
+use aes_gcm::aead::Aead;
+use aes_gcm::{Aes256Gcm, Nonce};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -138,12 +140,48 @@ fn pack(data: &[u8]) -> Vec<u8> {
     out
 }
 
+#[pyfunction]
+fn aes_gcm_encrypt(py: Python<'_>, key: &[u8], nonce: &[u8], plaintext: &[u8], aad: &[u8]) -> PyResult<Py<PyBytes>> {
+    if key.len() != 32 {
+        return Err(PyValueError::new_err("key must be 32 bytes"));
+    }
+    if nonce.len() != 12 {
+        return Err(PyValueError::new_err("nonce must be 12 bytes"));
+    }
+    let cipher = Aes256Gcm::new_from_slice(key)
+        .map_err(|_| PyValueError::new_err("bad key"))?;
+    let n = Nonce::from_slice(nonce);
+    let ct = cipher
+        .encrypt(n, aes_gcm::aead::Payload { msg: plaintext, aad })
+        .map_err(|_| PyValueError::new_err("encryption failed"))?;
+    Ok(PyBytes::new(py, &ct).into())
+}
+
+#[pyfunction]
+fn aes_gcm_decrypt(py: Python<'_>, key: &[u8], nonce: &[u8], ciphertext: &[u8], aad: &[u8]) -> PyResult<Py<PyBytes>> {
+    if key.len() != 32 {
+        return Err(PyValueError::new_err("key must be 32 bytes"));
+    }
+    if nonce.len() != 12 {
+        return Err(PyValueError::new_err("nonce must be 12 bytes"));
+    }
+    let cipher = Aes256Gcm::new_from_slice(key)
+        .map_err(|_| PyValueError::new_err("bad key"))?;
+    let n = Nonce::from_slice(nonce);
+    let pt = cipher
+        .decrypt(n, aes_gcm::aead::Payload { msg: ciphertext, aad })
+        .map_err(|_| PyValueError::new_err("decryption failed (wrong key or corrupted data)"))?;
+    Ok(PyBytes::new(py, &pt).into())
+}
+
 #[pymodule]
 fn ext(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(aes_ige_enc, m)?)?;
     m.add_function(wrap_pyfunction!(aes_ige_dec, m)?)?;
     m.add_function(wrap_pyfunction!(aes_ige_enc_raw, m)?)?;
     m.add_function(wrap_pyfunction!(aes_ige_dec_raw, m)?)?;
+    m.add_function(wrap_pyfunction!(aes_gcm_encrypt, m)?)?;
+    m.add_function(wrap_pyfunction!(aes_gcm_decrypt, m)?)?;
     m.add_function(wrap_pyfunction!(cut, m)?)?;
     m.add_function(wrap_pyfunction!(pack, m)?)?;
     Ok(())
