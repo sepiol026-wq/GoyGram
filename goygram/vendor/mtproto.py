@@ -159,48 +159,59 @@ def _parse_user_obj(b:bytes)->dict[str,Any]|None:
 
 
 def _parse_user_obj_v4(b:bytes, cid:int)->dict[str,Any]|None:
-    try:
-        p = 4
-        if cid in {0x8f97c628, 0x5c0d0a2a, 0xd8576e2a, 0x7fe4ab4, 0x2e13f2c3, 0xebe8e785}:
+    def _try_parse(with_flags2:bool)->dict[str,Any]|None:
+        try:
             p = 4
-            flags = int.from_bytes(b[p:p+4], "little", signed=True); p += 4
-            _flags2 = int.from_bytes(b[p:p+4], "little", signed=True); p += 4
-        else:
-            flags = int.from_bytes(b[p:p+4], "little", signed=True); p += 4
-        user_id = int.from_bytes(b[p:p+8], "little", signed=True); p += 8
-        access_hash = None
-        if flags & (1 << 0):
-            access_hash = int.from_bytes(b[p:p+8], "little", signed=True); p += 8
-        first_name = None
-        if flags & (1 << 1):
-            raw, p = _tl_bytes_at(b, p)
-            first_name = raw.decode("utf-8", errors="ignore")
-        last_name = None
-        if flags & (1 << 2):
-            raw, p = _tl_bytes_at(b, p)
-            last_name = raw.decode("utf-8", errors="ignore")
-        username = None
-        if flags & (1 << 3) or flags & (1 << 6):  # flag 6 = usernames vector in newer layers
-            raw, p = _tl_bytes_at(b, p)
-            username = raw.decode("utf-8", errors="ignore")
-        phone = None
-        if flags & (1 << 4):
-            raw, p = _tl_bytes_at(b, p)
-            phone = raw.decode("utf-8", errors="ignore")
-        out = {"id": user_id}
-        if access_hash is not None:
-            out["access_hash"] = access_hash
-        if first_name:
-            out["first_name"] = first_name
-        if last_name:
-            out["last_name"] = last_name
-        if username:
-            out["username"] = username
-        if phone:
-            out["phone"] = phone
-        return out
+            if with_flags2:
+                flags = int.from_bytes(b[p:p+4], "little", signed=True); p += 4
+                _flags2 = int.from_bytes(b[p:p+4], "little", signed=True); p += 4
+            else:
+                flags = int.from_bytes(b[p:p+4], "little", signed=True); p += 4
+            user_id = int.from_bytes(b[p:p+8], "little", signed=False); p += 8
+            if user_id == 0 or user_id > 10**12:
+                return None
+            access_hash = None
+            if flags & (1 << 0):
+                access_hash = int.from_bytes(b[p:p+8], "little", signed=True); p += 8
+            first_name = None
+            if flags & (1 << 1):
+                raw, p = _tl_bytes_at(b, p)
+                first_name = raw.decode("utf-8", errors="ignore")
+            last_name = None
+            if flags & (1 << 2):
+                raw, p = _tl_bytes_at(b, p)
+                last_name = raw.decode("utf-8", errors="ignore")
+            username = None
+            if flags & (1 << 3) or flags & (1 << 6):
+                raw, p = _tl_bytes_at(b, p)
+                username = raw.decode("utf-8", errors="ignore")
+            phone = None
+            if flags & (1 << 4):
+                raw, p = _tl_bytes_at(b, p)
+                phone = raw.decode("utf-8", errors="ignore")
+            out = {"id": user_id}
+            if access_hash is not None:
+                out["access_hash"] = access_hash
+            if first_name:
+                out["first_name"] = first_name
+            if last_name:
+                out["last_name"] = last_name
+            if username:
+                out["username"] = username
+            if phone:
+                out["phone"] = phone
+            return out
+        except Exception:
+            return None
+    try:
+        result = _try_parse(True)
+        if result is None:
+            result = _try_parse(False)
+        if result is None:
+            log.warning("User parse: both modes failed for cid=0x%08x: %s", cid, b[:128].hex())
+        return result
     except Exception:
-        log.warning("User parse failed for cid=0x%08x: %s", cid, b[:128].hex())
+        log.warning("User parse exception for cid=0x%08x: %s", cid, b[:128].hex())
         return None
 
 class ProxyCfg:
