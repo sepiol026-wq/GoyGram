@@ -27,6 +27,8 @@ except Exception:
 
 log = get_logger("goygram.security")
 
+VAULT_MAGIC = b"GGV2"
+
 
 def _get_machine_id() -> str:
     for p in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
@@ -57,14 +59,37 @@ def _derive_vault_key(session_name: str, salt: bytes | None = None) -> tuple[byt
     return key, salt
 
 
+def _derive_vault_key_v2(salt: bytes | None = None) -> tuple[bytes, bytes]:
+    env_key = os.getenv("GOYGRAM_VAULT_KEY", "").strip()
+    if env_key:
+        try:
+            key = base64.b64decode(env_key)
+            if len(key) == 32:
+                return key, salt or b"\x00" * 16
+        except Exception:
+            pass
+    if salt is None:
+        salt = _secrets.token_bytes(16)
+    material = _get_machine_id().encode()
+    key = hashlib.pbkdf2_hmac("sha256", material, salt, 600000, dklen=32)
+    return key, salt
+
+
 def _encrypt_vault_data(data: bytes, session_name: str) -> bytes:
-    key, salt = _derive_vault_key(session_name)
+    key, salt = _derive_vault_key_v2()
     nonce = _secrets.token_bytes(12)
     ciphertext = _rx.aes_gcm_encrypt(key, nonce, data, b"")
-    return salt + nonce + ciphertext
+    return VAULT_MAGIC + salt + nonce + ciphertext
 
 
 def _decrypt_vault_data(raw: bytes, session_name: str) -> bytes:
+    if raw.startswith(VAULT_MAGIC):
+        body = raw[len(VAULT_MAGIC):]
+        salt = body[:16]
+        nonce = body[16:28]
+        ciphertext = body[28:]
+        key, _ = _derive_vault_key_v2(salt)
+        return _rx.aes_gcm_decrypt(key, nonce, ciphertext, b"")
     salt = raw[:16]
     nonce = raw[16:28]
     ciphertext = raw[28:]
@@ -312,7 +337,7 @@ def _extract_auth_blob(obj: dict[str, Any]) -> bytes | None:
 
 
 def _extract_migrate_dc(err_text: str) -> int | None:
-    m = re.search(r"(?:PHONE|NETWORK)_MIGRATE_(\d+)", err_text.upper())
+    m = re.search(r"(?:PHONE|NETWORK|USER)_MIGRATE_(\d+)", err_text.upper())
     if not m:
         return None
     return int(m.group(1))
@@ -806,14 +831,90 @@ async def _mt_auth_flow(app: Any, vault: Path, session_name: str, api_id: int | 
             return {"source": "interactive"}
 
 
-async def bootstrap_session(app: Any | None = None, api_id: int | str | None = None, api_hash: str | None = None, session_name: str = "default") -> dict[str, str] | None:
-    vault = Path(f"{session_name}.vault")
+async def _mt_bot_auth_flow(app: Any, vault: Path, session_name: str, api_id: int, api_hash: str, bot_token: str) -> dict[str, str] | None:
+    if _is_interactive():
+        from rich.console import Console
+        Console().print("[bold magenta]GoyGram Bot Authorization (MTProto)[/bold magenta]")
+    else:
+        print("GoyGram bot authorization via MTProto (auth.importBotAuthorization)")
+    try:
+        res = await _mt_req_with_migrate(
+            app,
+            "auth.importBotAuthorization",
+            flags=0,
+            api_id=api_id,
+            api_hash=api_hash,
+            bot_auth_token=bot_token,
+        )
+    except Exception as exc:
+        if _is_interactive():
+            from rich.console import Console
+            Console().print(f"[bold red]auth.importBotAuthorization failed: {exc}[/bold red]")
+        else:
+            print(f"auth.importBotAuthorization failed: {exc}")
+        return None
+    if not isinstance(res, dict):
+        if _is_interactive():
+            from rich.console import Console
+            Console().print("[bold red]Unexpected MT response for auth.importBotAuthorization[/bold red]")
+        else:
+            print("Unexpected MT response for auth.importBotAuthorization")
+        return None
+    err = _extract_error(res) or ""
+    if err:
+        if _is_interactive():
+            from rich.console import Console
+            Console().print(f"[bold red]auth.importBotAuthorization error: {err}[/bold red]")
+        else:
+            print(f"auth.importBotAuthorization error: {err}")
+        return None
+    user = _extract_user(res)
+    auth_blob = _extract_auth_blob(res)
+    if auth_blob is None and getattr(app, "mt", None) is not None:
+        auth_blob = getattr(app.mt, "auth_key", None)
+    if user is None or auth_blob is None:
+        if _is_interactive():
+            from rich.console import Console
+            Console().print("[bold red]Bot authorization did not return user/session data[/bold red]")
+        else:
+            print("Bot authorization did not return user/session data")
+        return None
+    payload = {
+        "user": user,
+        "auth_key": auth_blob.hex(),
+        "server_salt": app.mt.server_salt.hex(),
+        "dc": _current_dc_id(app),
+        "api_id": api_id,
+        "api_hash": api_hash,
+        "bot_token": bot_token,
+        "is_bot": True,
+    }
+    _write_vault(vault, payload, session_name)
+    uid = user.get("id", 0)
+    if uid and uid != 0:
+        app.self_id = uid
+        app.mt.self_id = uid
+    if _is_interactive():
+        from rich.console import Console
+        Console().print(f"[bold green]Bot session saved to {vault.name}[/bold green]")
+    else:
+        print(f"Bot session saved to {vault.name}")
+    log.info("Bot MTProto authorization completed and session stored in %s.", vault.name)
+    return {"source": "bot_mtproto"}
+
+
+async def bootstrap_session(app: Any | None = None, api_id: int | str | None = None, api_hash: str | None = None, session_name: str = "default", bot_token: str | None = None, session: Any | None = None) -> dict[str, str] | None:
+    if session is None:
+        from goygram.session import Session
+        session = Session(name=session_name)
+    name = session.name
+    vault = session.path if session.path is not None else Path(f"{name}.vault")
     if vault.exists() and vault.stat().st_size > 0:
         if app is None or getattr(app, "mt", None) is None:
             log.info("Vault %s detected. Session bootstrap completed without MT context.", vault.name)
             return {"source": "vault"}
         try:
-            data = _read_vault(vault, Path(session_name).name)
+            data = _read_vault(vault, Path(name).name)
             auth_key = data.get("auth_key")
             if isinstance(auth_key, str) and auth_key:
                 app.mt.auth_key = _extract_auth_blob({"auth_key": auth_key})
@@ -836,13 +937,14 @@ async def bootstrap_session(app: Any | None = None, api_id: int | str | None = N
                 app.self_id = uid
                 app.mt.self_id = uid
                 log.info("Self ID resolved: %s", uid)
+            session.data = data
             log.info("Vault %s detected. Session restored from vault into MT runtime.", vault.name)
             return {"source": "vault"}
         except Exception as e:
             if app is not None and getattr(app, "mt", None) is not None:
                 app.mt.auth_key = None
             log.warning("Vault %s restore failed (%r), fallback to interactive auth.", vault.name, e)
-    sess = Path(f"{session_name}.session")
+    sess = Path(f"{name}.session")
     if sess.exists():
         log.info("Third-party session detected: %s", sess.name)
         try:
@@ -876,16 +978,28 @@ async def bootstrap_session(app: Any | None = None, api_id: int | str | None = N
                 "test_mode": test_mode,
                 "source_session": sess.name,
             }
-            _write_vault(vault, payload, session_name)
+            _write_vault(vault, payload, name)
             _zeroize_and_remove(sess)
             for suffix in ("-wal", "-shm", "-journal"):
                 sidecar = Path(f"{sess}{suffix}")
                 if sidecar.exists() and sidecar.is_file():
                     _zeroize_and_remove(sidecar)
+            session.data = payload
             log.info("Session migrated into %s and source file securely deleted.", vault.name)
             return {"source": "session_migrated"}
         except Exception as e:
             log.warning("Session migration failed for %s (%r).", sess.name, e)
     if app is None:
         raise RuntimeError("MT app context is required for interactive authorization")
-    return await _mt_auth_flow(app, vault, session_name=session_name, api_id=api_id, api_hash=api_hash)
+    if bot_token is not None:
+        if api_id is None or api_hash is None:
+            raise RuntimeError("bot_token over MTProto requires api_id and api_hash")
+        result = await _mt_bot_auth_flow(app, vault, session_name=name, api_id=int(str(api_id).strip()), api_hash=str(api_hash).strip(), bot_token=str(bot_token).strip())
+    else:
+        result = await _mt_auth_flow(app, vault, session_name=name, api_id=api_id, api_hash=api_hash)
+    if vault.exists() and vault.stat().st_size > 0:
+        try:
+            session.data = _read_vault(vault, Path(name).name) or session.data
+        except Exception:
+            pass
+    return result

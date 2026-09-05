@@ -26,6 +26,7 @@ Under the hood: a Python orchestration layer drives two completely independent n
 - **TUI auth flow**: terminal-first authorization workflow — phone login with SMS code, QR code scanning in ASCII art, 2FA/SRP password challenges. All Rich-styled when a TTY is present.
 - **Proxy support**: SOCKS5 (with user/pass auth) and HTTP CONNECT tunneling for MTProto connections. Also respects `ALL_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY` env vars.
 - **Dual transport**: Bot API (HTTP long-polling via aiohttp, multipart uploads, auto-webhook-clear on 409) + MTProto (raw TCP with AES-256-IGE, dynamic salt recovery on `bad_server_salt`, auto-DC migration on `PHONE_MIGRATE_N`) — in one app runtime.
+- **Bot over MTProto**: pass `bot_token` + `api_id`/`api_hash` to authorize a bot through `auth.importBotAuthorization` and switch between `via="api"` and `via="mtproto"` in the same runtime.
 - **DC Routing**: MTProto uses a built-in map of the five Telegram DC endpoints and selects the preferred DC, falling back to `149.154.167.50:443` (DC 2).
 - **Dynamic API dispatch**: every Bot API method works via `__getattr__` — `sendAnimation`, `getUserProfilePhotos`, `setMyCommands`, whatever. Snake_case auto-converts to CamelCase. `mt_` prefix routes to MTProto.
 - **Keyboard system**: inline keyboards, reply keyboards, force reply, reply removal. All with `to_dict()` serialization that adapts per transport.
@@ -33,6 +34,7 @@ Under the hood: a Python orchestration layer drives two completely independent n
 - **Zero-copy event objects**: `MsgObj`, `CbObj`, `PollObj`, `MemberObj` with `__slots__` — no per-message dict overhead.
 - **Composable filters**: boolean AND/OR/NOT on `Filter` (`filters.text & ~filters.me`).
 - **Multi-session**: named vaults (`session_name="worker_1"`) for farming multiple accounts from the same process. Separate auth keys, separate TCP connections, separate `self_id`.
+- **Portable sessions**: a single `Session` object doubles as memory, file (`.vault`), and encrypted string (`export_string()` / `from_string()`). Rename-safe vaults let you name the file by `self_id` after login.
 - **Durable delivery state**: Bot API offsets and MTProto `pts/qts/date/seq` cursors are persisted atomically with restrictive permissions.
 - **Direct media primitives**: chunked MTProto `upload_file()`/`download_file()` and Bot API `download_file()` without a heavyweight media framework.
 
@@ -114,6 +116,37 @@ asyncio.run(app.run())
 - With `session_name="farm_worker_1"`, session data is stored in `farm_worker_1.vault`.
 - If `farm_worker_1.session` exists, it is migrated to `farm_worker_1.vault` during bootstrap (securely zeroized after).
 
+### 4) Bot over MTProto (auth.importBotAuthorization)
+
+A bot can run over raw MTProto instead of the Bot API HTTP transport. Pass `bot_token` together with `api_id`/`api_hash` and GoyGram authorizes the bot through `auth.importBotAuthorization` — the MTProto equivalent of the Bot API token handshake (with automatic `USER_MIGRATE_N` DC migration):
+
+```python
+import asyncio
+from goygram import GoyGram
+
+app = GoyGram(
+    bot_token="123456:ABC_TOKEN",
+    api_id=123456,
+    api_hash="0123456789abcdef0123456789abcdef",
+    default_transport="mtproto",   # prefer MTProto for outgoing calls
+)
+
+@app.on_cmd("ping")
+async def ping(msg):
+    await msg.reply("pong via MTProto")
+
+asyncio.run(app.run())
+```
+
+Both transports stay available in one runtime. Switch per call with `via="api"` (Bot API) or `via="mtproto"` (MTProto):
+
+```python
+await app.send_msg("123456789", "via Bot API", via="api")
+await app.send_msg("123456789", "via MTProto", via="mtproto")
+```
+
+`default_transport` sets the default when `via` is omitted: `"api"`, `"mtproto"`, or `"auto"` (Bot API if a token is present, else MTProto).
+
 ## Dynamic API & Methods
 GoyGram can route Bot API method names dynamically, including methods that are not hardcoded as convenience methods:
 
@@ -155,6 +188,37 @@ The vault does not fall back to silently accepting plaintext after a failed decr
 ### Session Migration
 Telethon/Pyrogram `.session` files are auto-detected, read from SQLite, migrated to `.vault`, and securely zeroized (overwrite + fsync + unlink).
 
+## Session: memory, file, and portable string
+
+Every app exposes `app.session` — a single `Session` object that is the session in **memory**, in a **file** (`.vault`), and as a **portable encrypted string** at the same time. No separate `MemorySession` / `StringSession` / `SQLiteSession` classes and no painful conversions.
+
+```python
+from goygram import GoyGram, Session
+
+app = GoyGram(api_id=123456, api_hash="0123456789abcdef0123456789abcdef")
+
+# after authorization, read the account id and name the file by it (rename-safe):
+await app.session.save(f"{app.session.self_id}.vault")
+
+# or keep it as an encrypted, portable string (not plaintext like Telethon/Pyrogram):
+token = app.session.export_string()   # AES-256-GCM encrypted, machine-locked
+sess = Session.from_string(token)     # one call to restore
+```
+
+- **Rename-safe vaults**: the encryption key no longer depends on the file name, so you can log in first and name/rename the session file afterwards (e.g. by `self_id`).
+- **Encrypted string sessions**: `export_string()` / `from_string()` carry the session as an authenticated, machine-locked blob — unlike Telethon's and Pyrogram's plaintext `StringSession`.
+- **One object, three forms**: `session.data`, `session.save(path)`, `session.load(path)`, `session.export_string()`, `session.from_string(s)`. `self_id`, `is_bot`, `auth_key`, `server_salt`, and `dc` are exposed as properties.
+- **Backward compatible**: legacy vaults (and `.session` migrations) still decrypt; new vaults are written with a `GGV2` header that the reader auto-detects.
+
+Pass an existing session explicitly:
+
+```python
+app = GoyGram(api_id=..., api_hash=..., session=Session.from_string(token))
+app = GoyGram(api_id=..., api_hash=..., session=Session(name="worker_1"))
+```
+
+The constructor still accepts `session_name="..."` for the plain file-backed case.
+
 ## Developer Tools (Help)
 Use built-in introspection tools:
 
@@ -194,13 +258,13 @@ Messages can be routed explicitly by transport:
 
 ```python
 # Force Bot API
-await app.send_msg("bot:123456789", "via bot", via="bot")
+await app.send_msg("bot:123456789", "via api", via="api")
 
 # Force MTProto
-await app.send_msg("mt:123456789", "via mt", via="mt")
+await app.send_msg("mt:123456789", "via mtproto", via="mtproto")
 ```
 
-Chat ID prefixes (`bot:` / `mt:`) are auto-resolved. When replying, the transport source is preserved automatically — reply to a Bot API message, it goes back via Bot API.
+`via="api"` is an alias for the Bot API transport and `via="mtproto"` for MTProto (the short forms `via="bot"` / `via="mt"` still work). Chat ID prefixes (`bot:` / `mt:`) are auto-resolved. When replying, the transport source is preserved automatically — reply to a Bot API message, it goes back via Bot API.
 
 ## FSM Persistence
 

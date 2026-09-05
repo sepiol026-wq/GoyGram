@@ -3,12 +3,13 @@ from importlib.metadata import PackageNotFoundError, version as pkg_version
 
 from .client import GoyGram
 from .errors import StopPropagation
+from .session import Session
 from .utils import print_methods
 from .types.kbd import KbdBuilder
 from .types.member import MemberObj
 from .types.poll import PollObj
 
-__all__ = ["GoyGram", "StopPropagation", "KbdBuilder", "PollObj", "MemberObj", "print_methods"]
+__all__ = ["GoyGram", "Session", "StopPropagation", "KbdBuilder", "PollObj", "MemberObj", "print_methods"]
 
 from . import filters
 

@@ -71,6 +71,8 @@ class AppCore:
         api_hash: str | None = None,
         session_name: str = "default",
         *,
+        session: Any | None = None,
+        default_transport: str = "auto",
         proxy: str | None = None,
         app_name: str | None = None,
         app_version: str | None = None,
@@ -143,6 +145,19 @@ class AppCore:
         self.api_id = api_id
         self.api_hash = api_hash
         self.session_name = session_name
+        self.bot_token = cfg.bot.token if cfg.bot else None
+        self.default_transport = default_transport
+        from goygram.session import STRING_PREFIX, Session
+        if session is None:
+            self.session = Session(name=session_name)
+        elif isinstance(session, Session):
+            self.session = session
+        elif isinstance(session, str) and session.startswith(STRING_PREFIX):
+            self.session = Session.from_string(session, name=session_name)
+        elif isinstance(session, str):
+            self.session = Session(name=session)
+        else:
+            raise TypeError("session must be a Session instance or an encrypted session string")
 
     def _init_tl_schema(self) -> None:
         from goygram.schema_manager import init_schema
@@ -375,12 +390,16 @@ class AppCore:
         return chat_id
 
     def via(self, chat_id: int | str, via: str | None = None) -> str:
-        if via in {"bot", "mt"}:
-            if via == "bot" and self.bot is None:
+        _alias = {"api": "bot", "bot": "bot", "mtproto": "mt", "mt": "mt"}
+        if via is not None:
+            resolved = _alias.get(via)
+            if resolved is None:
+                raise ValueError(f"unknown transport {via!r}; use 'api' or 'mtproto'")
+            if resolved == "bot" and self.bot is None:
                 raise RuntimeError("bot net is not configured")
-            if via == "mt" and self.mt is None:
+            if resolved == "mt" and self.mt is None:
                 raise RuntimeError("mt net is not configured")
-            return via
+            return resolved
         if isinstance(chat_id, str) and chat_id.startswith("bot:"):
             if self.bot is None:
                 raise RuntimeError("bot net is not configured")
@@ -388,6 +407,10 @@ class AppCore:
         if isinstance(chat_id, str) and chat_id.startswith("mt:"):
             if self.mt is None:
                 raise RuntimeError("mt net is not configured")
+            return "mt"
+        if self.default_transport == "api" and self.bot is not None:
+            return "bot"
+        if self.default_transport == "mtproto" and self.mt is not None:
             return "mt"
         if self.bot is not None:
             return "bot"
@@ -505,7 +528,7 @@ class AppCore:
                     tasks.append(asyncio.create_task(self.bot.spin(), name="bot"))
             if self.mt:
                 self.log.info("MT transport is enabled.")
-                await bootstrap_session(self, api_id=self.api_id, api_hash=self.api_hash, session_name=self.session_name)
+                await bootstrap_session(self, api_id=self.api_id, api_hash=self.api_hash, session_name=self.session_name, bot_token=self.bot_token, session=self.session)
                 await self.mt.start()
                 tasks.append(self.mt._reader_task)
                 try:
@@ -541,6 +564,8 @@ class GoyGram:
         api_id: int | str | None = None,
         api_hash: str | None = None,
         session_name: str = "default",
+        session: Any | None = None,
+        default_transport: str = "auto",
         proxy: str | None = None,
         app_name: str | None = None,
         app_version: str | None = None,
@@ -579,7 +604,7 @@ class GoyGram:
         resolved_host = mt_host
         resolved_port = mt_port
 
-        if bot is None and resolved_host is None:
+        if resolved_host is None and (bot is None or api_id is not None or api_hash is not None):
             try:
                 dc_map = get_dynamic_dc_config()
                 selected = pick_dc_endpoint(dc_map, preferred_dc=2)
@@ -596,6 +621,8 @@ class GoyGram:
             api_id=api_id,
             api_hash=api_hash,
             session_name=session_name,
+            session=session,
+            default_transport=default_transport,
             proxy=proxy,
             app_name=app_name,
             app_version=app_version,
