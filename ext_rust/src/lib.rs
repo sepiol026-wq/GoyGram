@@ -310,9 +310,13 @@ fn deserialize_fields(data: &[u8], pos: &mut usize, fields: &[TlFieldDef], has_f
             let flags_val = flags_map.get(group).copied().unwrap_or(0);
             let bit = f.flag_bit.unwrap();
             if flags_val & (1 << bit) == 0 {
+                if f.is_bare {
+                    obj.insert(f.name.clone(), serde_json::json!(false));
+                }
                 continue;
             }
             if f.is_bare {
+                obj.insert(f.name.clone(), serde_json::json!(true));
                 continue;
             }
         }
