@@ -160,7 +160,7 @@ class AppCore:
             raise TypeError("session must be a Session instance or an encrypted session string")
 
     def _init_tl_schema(self) -> None:
-        from goygram.schema_manager import init_schema
+        from goygram.schema_manager import init_schema, CURRENT_LAYER_FLOOR
         from goygram import ext as _ext
         if _ext is None:
             return
@@ -169,7 +169,7 @@ class AppCore:
             None,
             lambda layer: self.mt.update_layer(layer),
             self._can_reload_schema,
-        ) or 229
+        ) or CURRENT_LAYER_FLOOR
 
     def _can_reload_schema(self) -> bool:
         return self.mt is not None and self.mt.auth_ready.is_set() and not self.mt.pending

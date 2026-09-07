@@ -325,7 +325,12 @@ class MTNet:
         self.qr_update_ev=asyncio.Event()
         self._init_done=False
         self._api_id:int|None=None
-        self.layer = 229
+        try:
+            from goygram.schema_manager import _cached_layer, CURRENT_LAYER_FLOOR
+            self.layer = _cached_layer() or CURRENT_LAYER_FLOOR
+        except Exception:
+            from goygram.schema_manager import CURRENT_LAYER_FLOOR
+            self.layer = CURRENT_LAYER_FLOOR
         self._preferred_dc: int | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._reader_lock = asyncio.Lock()

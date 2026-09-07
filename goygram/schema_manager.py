@@ -7,6 +7,7 @@ import os
 import re
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 log = logging.getLogger("goygram.schema_manager")
@@ -19,8 +20,12 @@ MTPROTO_SCHEMA_URL = (
     "https://raw.githubusercontent.com/telegramdesktop/tdesktop/dev/"
     "Telegram/SourceFiles/mtproto/scheme/mtproto.tl"
 )
-LAYER_URL = "https://core.telegram.org/api/layers"
+TDLIB_VERSION_URL = (
+    "https://raw.githubusercontent.com/tdlib/td/master/"
+    "td/telegram/Version.h"
+)
 CURRENT_LAYER_FLOOR = 229
+REFRESH_INTERVAL = 6 * 3600
 
 CACHE_DIR = Path.home() / ".goygram" / "cache"
 CACHE_SCHEMA_PATH = CACHE_DIR / "api.tl"
@@ -28,6 +33,7 @@ CACHE_ETAG_PATH = CACHE_DIR / "api.tl.etag"
 CACHE_MTPROTO_PATH = CACHE_DIR / "mtproto.tl"
 CACHE_MTPROTO_ETAG_PATH = CACHE_DIR / "mtproto.tl.etag"
 CACHE_LAYER_PATH = CACHE_DIR / "schema.layer"
+CACHE_LAYER_ETAG_PATH = CACHE_DIR / "schema.layer.etag"
 
 _fetch_lock = threading.Lock()
 
@@ -53,11 +59,14 @@ def _http_get(url: str, etag: str | None = None) -> tuple[str | None, str | None
 
 
 def _latest_layer() -> int:
-    body, _ = _http_get(LAYER_URL)
+    body, _ = _http_get(TDLIB_VERSION_URL)
     if body is None:
-        return CURRENT_LAYER_FLOOR
-    values = [int(value) for value in re.findall(r"Layer\s+(\d+)", body, re.IGNORECASE)]
-    return max([CURRENT_LAYER_FLOOR, *values]) if values else CURRENT_LAYER_FLOOR
+        return _cached_layer() or CURRENT_LAYER_FLOOR
+    match = re.search(r"MTPROTO_LAYER\s*=\s*(\d+)", body)
+    if match is None:
+        return _cached_layer() or CURRENT_LAYER_FLOOR
+    layer = int(match.group(1))
+    return max(layer, CURRENT_LAYER_FLOOR)
 
 
 def _cached_layer() -> int | None:
@@ -143,27 +152,31 @@ def init_schema(ext_module, bundled_api_tl_path: str | None = None, on_layer=Non
 
 
 def _background_update(ext_module, on_layer=None, can_reload=None):
-    log.debug("Background schema update started")
-    layer = _latest_layer()
-    api_text, mtproto_text = _fetch_and_cache_schema(layer)
-    if api_text is None:
-        log.debug("No schema update available")
-        return
-    try:
-        current = json.loads(ext_module.schema_info())
-    except Exception:
-        current = {}
-    if int(current.get("layer", 0) or 0) == layer:
-        log.debug("Official schema layer %s is already active", layer)
-        return
-    if callable(can_reload) and not can_reload():
-        log.info("Schema update cached; runtime reload deferred while RPCs are pending")
-        return
-    try:
-        _load_schema(ext_module, api_text, mtproto_text, layer)
-        _atomic_write(CACHE_LAYER_PATH, str(layer))
-        if callable(on_layer):
-            on_layer(layer)
-        log.info("Schema hot-reloaded layer=%s", layer)
-    except Exception as exc:
-        log.warning("Schema hot-reload failed: %s", exc)
+    while True:
+        time.sleep(REFRESH_INTERVAL)
+        try:
+            layer = _latest_layer()
+            api_text, mtproto_text = _fetch_and_cache_schema(layer)
+            if api_text is None:
+                log.debug("No schema update available")
+                continue
+            try:
+                current = json.loads(ext_module.schema_info())
+            except Exception:
+                current = {}
+            if int(current.get("layer", 0) or 0) == layer:
+                log.debug("Official schema layer %s is already active", layer)
+                continue
+            if callable(can_reload) and not can_reload():
+                log.info("Schema update cached; runtime reload deferred while RPCs are pending")
+                continue
+            try:
+                _load_schema(ext_module, api_text, mtproto_text, layer)
+                _atomic_write(CACHE_LAYER_PATH, str(layer))
+                if callable(on_layer):
+                    on_layer(layer)
+                log.info("Schema hot-reloaded layer=%s", layer)
+            except Exception as exc:
+                log.warning("Schema hot-reload failed: %s", exc)
+        except Exception as exc:
+            log.warning("Background schema update error: %s", exc)

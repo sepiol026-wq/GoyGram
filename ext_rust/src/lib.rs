@@ -28,6 +28,8 @@ struct TlFieldDef {
     is_vector: bool,
     #[serde(default)]
     vector_inner: Option<String>,
+    #[serde(default)]
+    vector_inner_is_vector: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -281,8 +283,9 @@ fn read_tl_vector(data: &[u8], pos: &mut usize, f: &TlFieldDef) -> Result<serde_
         flag_bit: None,
         flags_group: None,
         is_bare: false,
-        is_vector: false,
-        vector_inner: None,
+        is_vector: f.vector_inner_is_vector,
+        vector_inner: if f.vector_inner_is_vector { Some("int".to_string()) } else { None },
+        vector_inner_is_vector: false,
     };
     let mut arr = Vec::new();
     for _ in 0..count {
@@ -596,8 +599,9 @@ fn encode_tl_vector(f: &TlFieldDef, val: &serde_json::Value) -> Result<Vec<u8>, 
             flag_bit: None,
             flags_group: None,
             is_bare: false,
-            is_vector: false,
-            vector_inner: None,
+            is_vector: f.vector_inner_is_vector,
+            vector_inner: if f.vector_inner_is_vector { Some("int".to_string()) } else { None },
+            vector_inner_is_vector: false,
         };
         let eb = encode_field_value(&inner_field, item)?;
         buf.extend_from_slice(&eb);
