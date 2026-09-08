@@ -522,9 +522,11 @@ class AppCore:
             await self.fsm.start()
             if self.bot:
                 self.log.info("Bot transport is enabled.")
-                if self.bot.webhook_url:
+                if self.mt is not None:
+                    self.log.info("Hybrid mode: updates are served exclusively by MTProto; Bot API polling is off.")
+                if self.bot.webhook_url and self.mt is None:
                     await self.bot.start_webhook()
-                else:
+                elif self.mt is None:
                     try:
                         await self.bot_req("deleteWebhook", drop_pending_updates=False)
                     except Exception as e:
