@@ -620,6 +620,50 @@ class MTNet:
             }
             asyncio.create_task(self.bus.push("mt", member))
             return
+        if update_type in {"updateBotCallbackQuery", "updateInlineBotCallbackQuery"}:
+            peer = update.get("peer") or {}
+            peer_kind = peer.get("_") if isinstance(peer, dict) else None
+            chat_id = peer.get("user_id") if peer_kind == "peerUser" else -(peer.get("chat_id") or 0) if peer_kind == "peerChat" else -1000000000000 - peer.get("channel_id", 0) if peer_kind == "peerChannel" else None
+            cb = {
+                "kind": "cb",
+                "src": "mt",
+                "update_type": update_type,
+                "query_id": update.get("query_id"),
+                "msg_id": update.get("msg_id"),
+                "chat_id": chat_id,
+                "from_id": update.get("user_id"),
+                "data": bytes.fromhex(update["data"]).decode("utf-8", "replace") if isinstance(update.get("data"), str) else update.get("data"),
+                "chat_instance": update.get("chat_instance"),
+                "raw_update": update,
+            }
+            asyncio.create_task(self.bus.push("mt", cb))
+            return
+        if update_type == "updateBotInlineQuery":
+            inline = {
+                "kind": "inline",
+                "src": "mt",
+                "update_type": update_type,
+                "query_id": update.get("query_id"),
+                "from_id": update.get("user_id"),
+                "query": update.get("query", ""),
+                "offset": update.get("offset", ""),
+                "raw_update": update,
+            }
+            asyncio.create_task(self.bus.push("mt", inline))
+            return
+        if update_type == "updateBotInlineSend":
+            sent = {
+                "kind": "update",
+                "src": "mt",
+                "update_type": update_type,
+                "result_id": update.get("id"),
+                "from_id": update.get("user_id"),
+                "query": update.get("query", ""),
+                "msg_id": update.get("msg_id"),
+                "raw_update": update,
+            }
+            asyncio.create_task(self.bus.push("mt", sent))
+            return
         if update_type in {"updateNewMessage", "updateNewChannelMessage", "updateEditMessage", "updateEditChannelMessage", "updateShortMessage", "updateShortChatMessage", "updateShortSentMessage"}:
             message = update.get("message")
             if update_type in {"updateShortMessage", "updateShortChatMessage", "updateShortSentMessage"}:

@@ -20,7 +20,11 @@ class Obj:
         self.src = src
         self.raw = raw
         self.app = app
-        self.id = raw.get("msg_id") or raw.get("query_id") or raw.get("poll_id") or raw.get("id")
+        kind = raw.get("kind")
+        if kind == "cb" or kind == "inline":
+            self.id = raw.get("query_id")
+        else:
+            self.id = raw.get("msg_id") or raw.get("query_id") or raw.get("poll_id") or raw.get("id")
         self.chat_id = raw.get("chat_id")
         self.from_id = raw.get("from_id")
         self.msg_id = raw.get("msg_id")
@@ -137,9 +141,21 @@ class Obj:
         if self.kind == "inline" and results is not None:
             if self.id is None:
                 return None
-            if self.app.bot is None:
-                raise RuntimeError("bot net is not configured")
-            data: dict[str, Any] = {
+            if self.src == "mt" or self.app.bot is None:
+                if self.app.mt is None:
+                    raise RuntimeError("mt net is not configured")
+                data: dict[str, Any] = {
+                    "query_id": int(self.id),
+                    "gallery": bool(kw.pop("gallery", False)),
+                    "private": bool(kw.pop("is_personal", True)),
+                    "cache_time": int(cache_time),
+                }
+                next_offset = kw.pop("next_offset", None)
+                if next_offset:
+                    data["next_offset"] = next_offset
+                data["results"] = results
+                return await self.app.mt_req("messages.setInlineBotResults", **data)
+            data = {
                 "inline_query_id": str(self.id),
                 "results": results,
                 "cache_time": kw.pop("cache_time", cache_time),
@@ -152,11 +168,35 @@ class Obj:
             return await self.app.bot_req("answerInlineQuery", **data)
         if self.id is None:
             return None
-        if self.app.bot is None:
-            raise RuntimeError("bot net is not configured")
+        if self.src == "mt" or self.app.bot is None:
+            if self.app.mt is None:
+                raise RuntimeError("mt net is not configured")
+            return await self.app.mt_req(
+                "messages.setBotCallbackAnswer",
+                query_id=int(self.id),
+                message=text,
+                alert=bool(alert),
+                url=url,
+                cache_time=int(cache_time),
+            )
         return await self.app.bot_req("answerCallbackQuery", callback_query_id=str(self.id), text=text, show_alert=alert, url=url, cache_time=cache_time)
 
     async def edit(self, text: str, kbd: Any | None = None, **kw: Any) -> Any:
+        if self.src == "mt" or (self.app is not None and self.app.bot is None):
+            if self.app is None or self.app.mt is None:
+                raise RuntimeError("mt net is not configured")
+            data = dict(kw)
+            if kbd is not None:
+                data["reply_markup"] = kbd
+            inline_mid = self.inline_message_id
+            if inline_mid is not None:
+                id_field = inline_mid if isinstance(inline_mid, dict) else {"_": "inputBotInlineMessageID", "raw": inline_mid} if isinstance(inline_mid, (str, bytes)) else None
+                if id_field is None:
+                    return None
+                return await self.app.mt_req("messages.editInlineBotMessage", id=id_field, message=text, **data)
+            if self.chat_id is None or self.msg_id is None:
+                return None
+            return await self.app.mt_req("messages.editMessage", peer=self.chat_id, id=int(self.msg_id), message=text, **data)
         if self.app is None or self.app.bot is None:
             raise RuntimeError("bot net is not configured")
         data = dict(kw)
