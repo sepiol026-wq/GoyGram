@@ -464,7 +464,10 @@ class AppCore:
         if reply_to is not None:
             data["reply_to"] = reply_to
         if kbd is not None:
-            data["kbd"] = kbd
+            from goygram.types.kbd import kbd_to_tl
+            tl_kbd = kbd_to_tl(kbd)
+            if tl_kbd is not None:
+                data["reply_markup"] = tl_kbd
         data["_dispatch_chat_id"] = target
         data["_dispatch_message_text"] = text
         return await self.mt_req("messages.sendMessage", peer=peer, message=text, random_id=secrets.randbits(63), **data)
@@ -473,6 +476,11 @@ class AppCore:
         if self.mt is None:
             raise RuntimeError("mt net is not configured")
         data = {k: v.to_dict() if hasattr(v, "to_dict") else v for k, v in kw.items() if v is not None}
+        if act.startswith("messages.") and isinstance(data.get("reply_markup"), dict) and "inline_keyboard" in data.get("reply_markup", {}):
+            from goygram.types.kbd import kbd_to_tl
+            tl_kbd = kbd_to_tl(data["reply_markup"])
+            if tl_kbd is not None:
+                data["reply_markup"] = tl_kbd
         if 'api_id' not in data and self.api_id is not None:
             data['api_id'] = self.api_id
         if 'api_hash' not in data and self.api_hash is not None:
