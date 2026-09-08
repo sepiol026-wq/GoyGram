@@ -15,22 +15,18 @@ from goygram.api.methods import BotAPI
 from goygram.core.bus import Bus
 from goygram.core.disp import Disp
 from goygram.core.fsm import FSMEngine
-from goygram.types.cb import CbObj
-from goygram.types.inline import InlineObj
-from goygram.types.member import MemberObj
-from goygram.types.msg import MsgObj
-from goygram.types.poll import PollObj
+from goygram.types.obj import Obj
 from goygram.logging import get_logger
 from goygram.security import bootstrap_session
 from goygram.filters import Filter
 from goygram.dc_fetcher import get_dynamic_dc_config, pick_dc_endpoint
 from goygram.utils import print_methods
 
-Fn = Callable[[MsgObj], Awaitable[Any]]
-CbFn = Callable[[CbObj], Awaitable[Any]]
-PollFn = Callable[[PollObj], Awaitable[Any]]
-MemFn = Callable[[MemberObj], Awaitable[Any]]
-InlineFn = Callable[[InlineObj], Awaitable[Any]]
+Fn = Callable[["Obj"], Awaitable[Any]]
+CbFn = Fn
+PollFn = Fn
+MemFn = Fn
+InlineFn = Fn
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,7 +213,7 @@ class AppCore:
             if filt is None:
                 self.hook.append(inner)
                 return inner
-            async def guarded(msg: MsgObj) -> Any:
+            async def guarded(msg: "Obj") -> Any:
                 if filt(msg):
                     return await inner(msg)
                 return None
@@ -235,7 +231,7 @@ class AppCore:
             if filt is None:
                 self.edit_hook.append(inner)
                 return inner
-            async def guarded(msg: MsgObj) -> Any:
+            async def guarded(msg: "Obj") -> Any:
                 if filt(msg):
                     return await inner(msg)
                 return None
@@ -253,7 +249,7 @@ class AppCore:
             if filt is None:
                 self.cb_hook.append(inner)
                 return inner
-            async def guarded(cb: CbObj) -> Any:
+            async def guarded(cb: "Obj") -> Any:
                 if filt(cb):
                     return await inner(cb)
                 return None
@@ -271,7 +267,7 @@ class AppCore:
             if filt is None:
                 self.inline_hook.append(inner)
                 return inner
-            async def guarded(inline: InlineObj) -> Any:
+            async def guarded(inline: "Obj") -> Any:
                 if filt(inline):
                     return await inner(inline)
                 return None
@@ -289,7 +285,7 @@ class AppCore:
             if filt is None:
                 self.poll_hook.append(inner)
                 return inner
-            async def guarded(poll: PollObj) -> Any:
+            async def guarded(poll: "Obj") -> Any:
                 if filt(poll):
                     return await inner(poll)
                 return None
@@ -307,7 +303,7 @@ class AppCore:
             if filt is None:
                 self.member_hook.append(inner)
                 return inner
-            async def guarded(mem: MemberObj) -> Any:
+            async def guarded(mem: "Obj") -> Any:
                 if filt(mem):
                     return await inner(mem)
                 return None

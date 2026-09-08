@@ -636,10 +636,176 @@ fn serialize_constructor(py: Python<'_>, name: &str, args_json: &str) -> PyResul
     Ok(PyBytes::new(py, &data).into())
 }
 
+#[cfg(target_arch = "x86_64")]
+unsafe fn ige_expand_keys(key: &[u8; 32]) -> [std::arch::x86_64::__m128i; 15] {
+    use std::arch::x86_64::*;
+    let mut keys: [__m128i; 15] = std::mem::zeroed();
+    let kp = key.as_ptr() as *const __m128i;
+    keys[0] = _mm_loadu_si128(kp);
+    keys[1] = _mm_loadu_si128(kp.add(1));
+
+    macro_rules! expand_round {
+        ($pos:expr, $round:expr) => {
+            let mut t1 = keys[$pos - 2];
+            let mut t4;
+            let mut t3 = keys[$pos - 1];
+            let mut t2 = _mm_aeskeygenassist_si128(t3, $round);
+            t2 = _mm_shuffle_epi32(t2, 0xff);
+            t4 = _mm_slli_si128(t1, 0x4);
+            t1 = _mm_xor_si128(t1, t4);
+            t4 = _mm_slli_si128(t4, 0x4);
+            t1 = _mm_xor_si128(t1, t4);
+            t4 = _mm_slli_si128(t4, 0x4);
+            t1 = _mm_xor_si128(t1, t4);
+            t1 = _mm_xor_si128(t1, t2);
+            keys[$pos] = t1;
+
+            let mut t4b = _mm_aeskeygenassist_si128(t1, 0x00);
+            t4b = _mm_shuffle_epi32(t4b, 0xaa);
+            let mut t5 = _mm_slli_si128(t3, 0x4);
+            t3 = _mm_xor_si128(t3, t5);
+            t5 = _mm_slli_si128(t5, 0x4);
+            t3 = _mm_xor_si128(t3, t5);
+            t5 = _mm_slli_si128(t5, 0x4);
+            t3 = _mm_xor_si128(t3, t5);
+            t3 = _mm_xor_si128(t3, t4b);
+            keys[$pos + 1] = t3;
+        };
+    }
+    macro_rules! expand_round_last {
+        ($pos:expr, $round:expr) => {
+            let mut t1 = keys[$pos - 2];
+            let t3 = keys[$pos - 1];
+            let mut t2 = _mm_aeskeygenassist_si128(t3, $round);
+            t2 = _mm_shuffle_epi32(t2, 0xff);
+            let mut t4 = _mm_slli_si128(t1, 0x4);
+            t1 = _mm_xor_si128(t1, t4);
+            t4 = _mm_slli_si128(t4, 0x4);
+            t1 = _mm_xor_si128(t1, t4);
+            t4 = _mm_slli_si128(t4, 0x4);
+            t1 = _mm_xor_si128(t1, t4);
+            t1 = _mm_xor_si128(t1, t2);
+            keys[$pos] = t1;
+        };
+    }
+
+    expand_round!(2, 0x01);
+    expand_round!(4, 0x02);
+    expand_round!(6, 0x04);
+    expand_round!(8, 0x08);
+    expand_round!(10, 0x10);
+    expand_round!(12, 0x20);
+    expand_round_last!(14, 0x40);
+    keys
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "aes")]
+unsafe fn ige_inv_keys(keys: &[std::arch::x86_64::__m128i; 15]) -> [std::arch::x86_64::__m128i; 15] {
+    use std::arch::x86_64::*;
+    [
+        keys[0],
+        _mm_aesimc_si128(keys[1]),
+        _mm_aesimc_si128(keys[2]),
+        _mm_aesimc_si128(keys[3]),
+        _mm_aesimc_si128(keys[4]),
+        _mm_aesimc_si128(keys[5]),
+        _mm_aesimc_si128(keys[6]),
+        _mm_aesimc_si128(keys[7]),
+        _mm_aesimc_si128(keys[8]),
+        _mm_aesimc_si128(keys[9]),
+        _mm_aesimc_si128(keys[10]),
+        _mm_aesimc_si128(keys[11]),
+        _mm_aesimc_si128(keys[12]),
+        _mm_aesimc_si128(keys[13]),
+        keys[14],
+    ]
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "aes")]
+unsafe fn aes_ige_x86(data: &[u8], key: &[u8; 32], iv: &[u8; 32], direction: u8) -> Vec<u8> {
+    use std::arch::x86_64::*;
+    let mut result = vec![0u8; data.len()];
+    let enc_keys = ige_expand_keys(key);
+    let dec_keys = if direction == 0 { ige_inv_keys(&enc_keys) } else { enc_keys };
+    let mut x = if direction == 0 { _mm_loadu_si128(unsafe { iv.as_ptr().add(16) } as *const __m128i) } else { _mm_loadu_si128(iv.as_ptr() as *const __m128i) };
+    let mut y = if direction == 0 { _mm_loadu_si128(iv.as_ptr() as *const __m128i) } else { _mm_loadu_si128(unsafe { iv.as_ptr().add(16) } as *const __m128i) };
+    let mut off = 0usize;
+    if direction == 0 {
+        while off < data.len() {
+            let m = _mm_loadu_si128(data.as_ptr().add(off) as *const __m128i);
+            let mut t = _mm_xor_si128(m, x);
+            t = _mm_xor_si128(t, dec_keys[14]);
+            t = _mm_aesdec_si128(t, dec_keys[13]);
+            t = _mm_aesdec_si128(t, dec_keys[12]);
+            t = _mm_aesdec_si128(t, dec_keys[11]);
+            t = _mm_aesdec_si128(t, dec_keys[10]);
+            t = _mm_aesdec_si128(t, dec_keys[9]);
+            t = _mm_aesdec_si128(t, dec_keys[8]);
+            t = _mm_aesdec_si128(t, dec_keys[7]);
+            t = _mm_aesdec_si128(t, dec_keys[6]);
+            t = _mm_aesdec_si128(t, dec_keys[5]);
+            t = _mm_aesdec_si128(t, dec_keys[4]);
+            t = _mm_aesdec_si128(t, dec_keys[3]);
+            t = _mm_aesdec_si128(t, dec_keys[2]);
+            t = _mm_aesdec_si128(t, dec_keys[1]);
+            let out = _mm_xor_si128(_mm_aesdeclast_si128(t, dec_keys[0]), y);
+            _mm_storeu_si128(result.as_mut_ptr().add(off) as *mut __m128i, out);
+            x = out;
+            y = m;
+            off += 16;
+        }
+    } else {
+        while off < data.len() {
+            let m = _mm_loadu_si128(data.as_ptr().add(off) as *const __m128i);
+            let mut t = _mm_xor_si128(m, x);
+            t = _mm_xor_si128(t, enc_keys[0]);
+            t = _mm_aesenc_si128(t, enc_keys[1]);
+            t = _mm_aesenc_si128(t, enc_keys[2]);
+            t = _mm_aesenc_si128(t, enc_keys[3]);
+            t = _mm_aesenc_si128(t, enc_keys[4]);
+            t = _mm_aesenc_si128(t, enc_keys[5]);
+            t = _mm_aesenc_si128(t, enc_keys[6]);
+            t = _mm_aesenc_si128(t, enc_keys[7]);
+            t = _mm_aesenc_si128(t, enc_keys[8]);
+            t = _mm_aesenc_si128(t, enc_keys[9]);
+            t = _mm_aesenc_si128(t, enc_keys[10]);
+            t = _mm_aesenc_si128(t, enc_keys[11]);
+            t = _mm_aesenc_si128(t, enc_keys[12]);
+            t = _mm_aesenc_si128(t, enc_keys[13]);
+            let out = _mm_xor_si128(_mm_aesenclast_si128(t, enc_keys[14]), y);
+            _mm_storeu_si128(result.as_mut_ptr().add(off) as *mut __m128i, out);
+            x = out;
+            y = m;
+            off += 16;
+        }
+    }
+    result
+}
+
+#[pyfunction]
+fn aes_ige_fast_path() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("aes") && std::arch::is_x86_feature_detected!("sse2")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    { false }
+}
+
 fn aes_ige_impl(data: &[u8], key: &[u8], iv: &[u8], direction: u8) -> Result<Vec<u8>, String> {
     if data.len() % 16 != 0 { return Err("AES-IGE data length must be a multiple of 16".to_string()); }
     if key.len() != 32 { return Err("AES-IGE key must be 32 bytes".to_string()); }
     if iv.len() != 32 { return Err("AES-IGE IV must be 32 bytes".to_string()); }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("aes") && std::arch::is_x86_feature_detected!("sse2") {
+            let key_arr: &[u8; 32] = key.try_into().unwrap();
+            let iv_arr: &[u8; 32] = iv.try_into().unwrap();
+            return Ok(unsafe { aes_ige_x86(data, key_arr, iv_arr, direction) });
+        }
+    }
     use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
     use aes::Aes256;
 
@@ -673,43 +839,43 @@ fn aes_ige_impl(data: &[u8], key: &[u8], iv: &[u8], direction: u8) -> Result<Vec
 }
 
 #[pyfunction]
-fn aes_ige_enc(py: Python<'_>, data: Vec<u8>, key: Vec<u8>, iv: Vec<u8>) -> PyResult<Py<PyBytes>> {
-    let out = aes_ige_impl(&data, &key, &iv, 1).map_err(PyValueError::new_err)?;
+fn aes_ige_enc(py: Python<'_>, data: &[u8], key: &[u8], iv: &[u8]) -> PyResult<Py<PyBytes>> {
+    let out = aes_ige_impl(data, key, iv, 1).map_err(PyValueError::new_err)?;
     Ok(PyBytes::new(py, &out).into())
 }
 
 #[pyfunction]
-fn aes_ige_dec(py: Python<'_>, data: Vec<u8>, key: Vec<u8>, iv: Vec<u8>) -> PyResult<Py<PyBytes>> {
-    let out = aes_ige_impl(&data, &key, &iv, 0).map_err(PyValueError::new_err)?;
+fn aes_ige_dec(py: Python<'_>, data: &[u8], key: &[u8], iv: &[u8]) -> PyResult<Py<PyBytes>> {
+    let out = aes_ige_impl(data, key, iv, 0).map_err(PyValueError::new_err)?;
     Ok(PyBytes::new(py, &out).into())
 }
 
 #[pyfunction]
-fn aes_ige_enc_raw(data: Vec<u8>, key: Vec<u8>, iv: Vec<u8>) -> PyResult<Vec<u8>> {
-    aes_ige_impl(&data, &key, &iv, 1).map_err(PyValueError::new_err)
+fn aes_ige_enc_raw(data: &[u8], key: &[u8], iv: &[u8]) -> PyResult<Vec<u8>> {
+    aes_ige_impl(data, key, iv, 1).map_err(PyValueError::new_err)
 }
 
 #[pyfunction]
-fn aes_ige_dec_raw(data: Vec<u8>, key: Vec<u8>, iv: Vec<u8>) -> PyResult<Vec<u8>> {
-    aes_ige_impl(&data, &key, &iv, 0).map_err(PyValueError::new_err)
+fn aes_ige_dec_raw(data: &[u8], key: &[u8], iv: &[u8]) -> PyResult<Vec<u8>> {
+    aes_ige_impl(data, key, iv, 0).map_err(PyValueError::new_err)
 }
 
 #[pyfunction]
-fn aes_gcm_encrypt(py: Python<'_>, key: Vec<u8>, nonce: Vec<u8>, plaintext: Vec<u8>, aad: Vec<u8>) -> PyResult<Py<PyBytes>> {
-    let cipher = Aes256Gcm::new_from_slice(&key)
+fn aes_gcm_encrypt(py: Python<'_>, key: &[u8], nonce: &[u8], plaintext: &[u8], aad: &[u8]) -> PyResult<Py<PyBytes>> {
+    let cipher = Aes256Gcm::new_from_slice(key)
         .map_err(|e| PyRuntimeError::new_err(format!("AES-GCM key error: {}", e)))?;
-    let n = Nonce::from_slice(&nonce);
-    let ct = cipher.encrypt(n, Payload { msg: &plaintext, aad: &aad })
+    let n = Nonce::from_slice(nonce);
+    let ct = cipher.encrypt(n, Payload { msg: plaintext, aad })
         .map_err(|e| PyRuntimeError::new_err(format!("AES-GCM encrypt error: {}", e)))?;
     Ok(PyBytes::new(py, &ct).into())
 }
 
 #[pyfunction]
-fn aes_gcm_decrypt(py: Python<'_>, key: Vec<u8>, nonce: Vec<u8>, ciphertext: Vec<u8>, aad: Vec<u8>) -> PyResult<Py<PyBytes>> {
-    let cipher = Aes256Gcm::new_from_slice(&key)
+fn aes_gcm_decrypt(py: Python<'_>, key: &[u8], nonce: &[u8], ciphertext: &[u8], aad: &[u8]) -> PyResult<Py<PyBytes>> {
+    let cipher = Aes256Gcm::new_from_slice(key)
         .map_err(|e| PyRuntimeError::new_err(format!("AES-GCM key error: {}", e)))?;
-    let n = Nonce::from_slice(&nonce);
-    let pt = cipher.decrypt(n, Payload { msg: &ciphertext, aad: &aad })
+    let n = Nonce::from_slice(nonce);
+    let pt = cipher.decrypt(n, Payload { msg: ciphertext, aad })
         .map_err(|e| PyRuntimeError::new_err(format!("AES-GCM decrypt error: {}", e)))?;
     Ok(PyBytes::new(py, &pt).into())
 }
@@ -739,6 +905,7 @@ fn ext(m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(serialize_constructor, m)?)?;
     m.add_function(wrap_pyfunction!(deserialize_constructor, m)?)?;
     m.add_function(wrap_pyfunction!(aes_ige_enc, m)?)?;
+    m.add_function(wrap_pyfunction!(aes_ige_fast_path, m)?)?;
     m.add_function(wrap_pyfunction!(aes_ige_dec, m)?)?;
     m.add_function(wrap_pyfunction!(aes_ige_enc_raw, m)?)?;
     m.add_function(wrap_pyfunction!(aes_ige_dec_raw, m)?)?;

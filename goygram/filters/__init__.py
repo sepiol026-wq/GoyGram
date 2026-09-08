@@ -1319,14 +1319,14 @@ member_any = Filter(lambda e: True, _name="member_any")
 
 
 class update_type(Filter):
-    _MAP = {"msg": "MsgObj", "cb": "CbObj", "poll": "PollObj", "member": "MemberObj"}
+    _MAP = {"msg": "msg", "cb": "cb", "poll": "poll", "member": "member", "inline": "inline", "update": "update", "edit": "edit"}
 
     def __init__(self, *types: str):
         self._ts = {self._MAP.get(t, t) for t in types}
         super().__init__(fn=self._chk, _name=f"update_type({types})")
 
     def _chk(self, e: object) -> bool:
-        return type(e).__name__ in self._ts
+        return getattr(e, "kind", None) in self._ts or getattr(e, "update_type", None) in self._ts
 
 
 class network(Filter):

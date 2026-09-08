@@ -8,18 +8,13 @@ from typing import Any
 from goygram.logging import get_logger
 
 from goygram.errors import StopPropagation
-from goygram.types.cb import CbObj
-from goygram.types.inline import InlineObj
-from goygram.types.member import MemberObj
-from goygram.types.msg import MsgObj
-from goygram.types.poll import PollObj
-from goygram.types.update import UpdateObj
+from goygram.types.obj import Obj
 
-Fn = Callable[[MsgObj], Awaitable[Any]]
-CbFn = Callable[[CbObj], Awaitable[Any]]
-PollFn = Callable[[PollObj], Awaitable[Any]]
-MemFn = Callable[[MemberObj], Awaitable[Any]]
-InlineFn = Callable[[InlineObj], Awaitable[Any]]
+Fn = Callable[["Obj"], Awaitable[Any]]
+CbFn = Fn
+PollFn = Fn
+MemFn = Fn
+InlineFn = Fn
 
 
 class Disp:
@@ -41,7 +36,7 @@ class Disp:
             self.log.warning("Disp error event: %s", data.get("text", ""))
             return
         if kind != "update":
-            update = UpdateObj(pkt.get("src", "sys"), data, self.app)
+            update = Obj(pkt.get("src", "sys"), data, self.app)
             for fn in list(getattr(self.app, "update_hook", [])):
                 try:
                     await fn(update)
@@ -51,7 +46,7 @@ class Disp:
                     self.log.error("Handler failure: %r", e)
                     await self.bus.push("sys", {"kind": "err", "src": "disp", "text": repr(e)})
         if kind == "msg":
-            msg = MsgObj(pkt.get("src", "sys"), data, self.app)
+            msg = Obj(pkt.get("src", "sys"), data, self.app)
             for fn in list(self.app.hook):
                 try:
                     await fn(msg)
@@ -62,7 +57,7 @@ class Disp:
                     await self.bus.push("sys", {"kind": "err", "src": "disp", "text": repr(e)})
             return
         if kind == "edit":
-            msg = MsgObj(pkt.get("src", "sys"), data, self.app)
+            msg = Obj(pkt.get("src", "sys"), data, self.app)
             for fn in list(getattr(self.app, "edit_hook", [])):
                 try:
                     await fn(msg)
@@ -73,7 +68,7 @@ class Disp:
                     await self.bus.push("sys", {"kind": "err", "src": "disp", "text": repr(e)})
             return
         if kind == "poll":
-            poll = PollObj(pkt.get("src", "sys"), data, self.app)
+            poll = Obj(pkt.get("src", "sys"), data, self.app)
             for fn in list(getattr(self.app, "poll_hook", [])):
                 try:
                     await fn(poll)
@@ -84,7 +79,7 @@ class Disp:
                     await self.bus.push("sys", {"kind": "err", "src": "disp", "text": repr(e)})
             return
         if kind == "cb":
-            cb = CbObj(pkt.get("src", "sys"), data, self.app)
+            cb = Obj(pkt.get("src", "sys"), data, self.app)
             for fn in list(self.app.cb_hook):
                 try:
                     await fn(cb)
@@ -95,7 +90,7 @@ class Disp:
                     await self.bus.push("sys", {"kind": "err", "src": "disp", "text": repr(e)})
             return
         if kind == "inline":
-            inline = InlineObj(pkt.get("src", "sys"), data, self.app)
+            inline = Obj(pkt.get("src", "sys"), data, self.app)
             for fn in list(getattr(self.app, "inline_hook", [])):
                 try:
                     await fn(inline)
@@ -106,7 +101,7 @@ class Disp:
                     await self.bus.push("sys", {"kind": "err", "src": "disp", "text": repr(e)})
             return
         if kind == "update":
-            update = UpdateObj(pkt.get("src", "sys"), data, self.app)
+            update = Obj(pkt.get("src", "sys"), data, self.app)
             for fn in list(getattr(self.app, "update_hook", [])):
                 try:
                     await fn(update)
@@ -118,7 +113,7 @@ class Disp:
             return
         if kind != "member":
             return
-        mem = MemberObj(pkt.get("src", "sys"), data, self.app)
+        mem = Obj(pkt.get("src", "sys"), data, self.app)
         for fn in list(getattr(self.app, "member_hook", [])):
             try:
                 await fn(mem)

@@ -330,6 +330,7 @@ class BotNet:
                 "msg_id": msg.get("message_id"),
                 "chat_id": chat.get("id"),
                 "from_id": usr.get("id"),
+                "inline_message_id": cb.get("inline_message_id"),
                 "data": cb.get("data", ""),
                 "text": (msg.get("text") or msg.get("caption") or ""),
                 "raw": upd,

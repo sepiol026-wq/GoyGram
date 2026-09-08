@@ -6,8 +6,8 @@ from .errors import StopPropagation
 from .session import Session
 from .utils import print_methods
 from .types.kbd import KbdBuilder
-from .types.member import MemberObj
-from .types.poll import PollObj
+from .types.obj import Obj as MemberObj
+from .types.obj import Obj as PollObj
 
 __all__ = ["GoyGram", "Session", "StopPropagation", "KbdBuilder", "PollObj", "MemberObj", "print_methods"]
 
