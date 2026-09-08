@@ -31,7 +31,7 @@ Under the hood: a Python orchestration layer drives two completely independent n
 - **Dynamic API dispatch**: every Bot API method works via `__getattr__` — `sendAnimation`, `getUserProfilePhotos`, `setMyCommands`, whatever. Snake_case auto-converts to CamelCase. `mt_` prefix routes to MTProto.
 - **Keyboard system**: inline keyboards, reply keyboards, force reply, reply removal. All with `to_dict()` serialization that adapts per transport.
 - **Forum topic management**: full create/edit/close/reopen/delete lifecycle for forum topics and the General topic. Both transports supported.
-- **Zero-copy event objects**: `MsgObj`, `CbObj`, `PollObj`, `MemberObj` with `__slots__` — no per-message dict overhead.
+- **One dynamic event object**: `Obj` with kind-dispatch; `MsgObj`, `CbObj`, `PollObj`, `MemberObj`, `InlineObj` are aliases — lazy raw-field access, no model registry, no per-kind classes.
 - **Composable filters**: boolean AND/OR/NOT on `Filter` (`filters.text & ~filters.me`).
 - **Multi-session**: named vaults (`session_name="worker_1"`) for farming multiple accounts from the same process. Separate auth keys, separate TCP connections, separate `self_id`.
 - **Portable sessions**: a single `Session` object doubles as memory, file (`.vault`), and encrypted string (`export_string()` / `from_string()`). Rename-safe vaults let you name the file by `self_id` after login.
@@ -44,11 +44,11 @@ Cold import, memory footprint, and MTProto crypto (AES-256-IGE) measured against
 
 | | goygram | telethon | pyrogram | aiogram | python-telegram-bot |
 |---|---|---|---|---|---|
-| cold import (ms) | **87** | 298 | 477 | 3112 | 140 |
-| RSS delta (MB) | **12** | 48 | 35 | 152 | 18 |
-| AES-256-IGE (MB/s, 64 KiB) | **113** | 12 | 203 | — | — |
+| cold import (ms) | **74** | 272 | 436 | 2699 | 141 |
+| RSS delta (MB) | **13** | 48 | 35 | 152 | 19 |
+| AES-256-IGE (MB/s, 64 KiB) | **1094** | 14 | 228 | — | — |
 
-The crypto runs in Rust (built in, no separate C extension), GoyGram starts ~36× faster than aiogram, and uses ~12× less memory.
+The crypto runs in Rust with AES-NI intrinsics selected at runtime (built in, no separate C extension; tgcrypto 1.2.5 measures 234 MB/s on the same box), GoyGram starts ~36× faster than aiogram, and uses ~12× less memory.
 
 ## Installation
 ```bash
@@ -234,7 +234,7 @@ from goygram.utils import print_methods
 print_methods(app)
 ```
 
-With type hints on key event objects (`MsgObj`, `CbObj`, `MemberObj`, `PollObj`) and filter primitives, modern IDE autocomplete works much better out of the box.
+With type hints on key event aliases (`MsgObj`, `CbObj`, `MemberObj`, `PollObj`) and filter primitives, modern IDE autocomplete works much better out of the box.
 
 ## Filters
 `goygram.filters` supports composable boolean operators:
@@ -309,7 +309,7 @@ BotNet.spin() ──→ bus.push("bot", data)
 MTNet.spin() ──→ bus.push("mt", data)
 ```
 
-Single `asyncio.Queue` → typed event objects (`MsgObj`/`CbObj`/`PollObj`/`MemberObj`) → handler lists in registration order. Per-handler error isolation — one crashing handler never takes down the dispatcher.
+Single `asyncio.Queue` → dynamic event objects (`MsgObj`/`CbObj`/`PollObj`/`MemberObj`/`InlineObj`, aliases of one `Obj`) → handler lists in registration order. Per-handler error isolation — one crashing handler never takes down the dispatcher.
 
 ## Logging
 
