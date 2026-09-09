@@ -334,6 +334,7 @@ class MTNet:
         self._preferred_dc: int | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._reader_lock = asyncio.Lock()
+        self._auth_lock = asyncio.Lock()
 
     def update_layer(self, layer: int) -> None:
         self.layer = int(layer)
@@ -519,9 +520,18 @@ class MTNet:
         r=Reader(pkt); _=r.i64(); _=r.i64(); ln=r.i32(); return r.take(ln)
 
     async def ensure_auth_key(self)->None:
+        if self.auth_key is not None and self.auth_ready.is_set():
+            self.auth_ready.set()
+            return
+        async with self._auth_lock:
+            if self.auth_key is not None and self.auth_ready.is_set():
+                return
+            await self._ensure_auth_key_inner()
+            self.auth_ready.set()
+
+    async def _ensure_auth_key_inner(self)->None:
         await self.boot()
         if self.auth_key is not None:
-            self.auth_ready.set()
             return
         if rx is None: raise RuntimeError('rx (goygram.ext) is not available')
         nonce=secrets.token_bytes(16)
@@ -587,7 +597,6 @@ class MTNet:
         self.auth_key=pow(g_a,b,dh_prime).to_bytes(256,'big')
         self.server_salt=bytes(a^b for a,b in zip(new_nonce[:8],server_nonce[:8]))
         self._init_done=False
-        self.auth_ready.set()
 
     def _dispatch_update(self, update: Any) -> None:
         if not isinstance(update, dict):

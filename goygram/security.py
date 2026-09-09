@@ -373,6 +373,9 @@ async def _mt_req_with_migrate(app: Any, act: str, **kw: Any) -> dict[str, Any]:
         app.mt.session_id = _sec.token_bytes(8)
         await app.mt.boot()
         await app.mt.ensure_auth_key()
+        ensure_reader = getattr(app.mt, "_ensure_reader", None)
+        if ensure_reader is not None:
+            await ensure_reader()
         log.warning("Migrated MT auth request to dc%s %s:%s", dc_id, endpoint.host, endpoint.port)
 
 async def _mt_qr_auth_flow(app: Any, vault: Path, session_name: str, api_id: int, api_hash: str) -> dict[str, str] | None:
